@@ -5,8 +5,7 @@ set -ouex pipefail
 dnf5 remove -y \
   firefox.x86_64
 
-sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-sudo flatpak remote-modify --enable flathub
-sudo flatpak install -y flathub com.microsoft.Edge
+dnf5 install -y \
+  epiphany.x86_64
 
 systemctl enable podman.socket
