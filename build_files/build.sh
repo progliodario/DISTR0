@@ -3,7 +3,7 @@
 set -ouex pipefail
 
 # Installing packages
-# dnf5 install -y \
+dnf5 uninstall -y firefox.x86_64
 
 # Enabling services
 systemctl enable podman.socket
