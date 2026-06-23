@@ -2,7 +2,7 @@
 
 set -ouex pipefail
 
-dnf5 remove -y firefox.x86_64
-dnf5 install -y microsoft-edge
+dnf5 remove -y --skip-unavailable \
+  firefox.x86_64 
 
 systemctl enable podman.socket
