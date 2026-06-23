@@ -2,9 +2,11 @@
 
 set -ouex pipefail
 
-# Install packages
+# Installing packages
 dnf5 install -y tmux
-dnf5 install -y edge
+
+flatpak install flathub com.microsoft.Edge
+flatpak uninstall flathub org.mozilla.firefox
 
 # Enabling services
 systemctl enable podman.socket
