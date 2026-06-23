@@ -2,8 +2,8 @@
 
 set -ouex pipefail
 
-# Installing packages
 dnf5 remove -y firefox.x86_64
+dnf5 remove -y gnome-contacts.x86_64
+dnf5 install -y microsoft-edge-stable
 
-# Enabling services
 systemctl enable podman.socket
