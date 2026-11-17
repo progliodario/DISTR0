@@ -181,7 +181,7 @@ instead of ten minutes into an image build.
 
 | Path | Purpose |
 | --- | --- |
-| `Containerfile` | Image definition: base image (pinned) + `build.sh` + `bootc container lint` |
+| `Containerfile` | Image definition: base image (pinned) + `build_files/build.sh` + `bootc container lint` |
 | `build_files/build.sh` | The customization entrypoint: overlay, packages, `os-release` rebrand, services, smoke tests |
 | `system_files/` | Tree mirrored onto `/` at build time (`system_files/etc/foo` → `/etc/foo`); symlinks are preserved |
 | `disk_config/` | bootc-image-builder configs for disk images and the installer ISO |

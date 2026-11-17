@@ -11,6 +11,7 @@ Only the repository is read; nothing is modified and no network is used.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -339,28 +340,93 @@ def slug(heading: str) -> str:
     return re.sub(r"[^a-z0-9 -]", "", text).replace(" ", "-")
 
 
+# Backticked tokens in the docs that read like paths but are not: the README
+# uses one as a worked example of the overlay.
+ILLUSTRATIVE_PATHS = {"system_files/etc/foo"}
+
+# `Europe/Rome` is a timezone, not a path.
+TIMEZONE = re.compile(r"^[A-Z][A-Za-z_+-]*/[A-Z][A-Za-z_+-]*$")
+
+PATH_EXTENSIONS = {
+    "brewfile",
+    "conf",
+    "json5",
+    "just",
+    "md",
+    "png",
+    "preinstall",
+    "pub",
+    "py",
+    "sh",
+    "svg",
+    "toml",
+    "yaml",
+    "yml",
+}
+
+
+def looks_like_path(token: str) -> bool:
+    """True for repository paths, False for commands, image refs, timezones."""
+    if not token or " " in token or token.startswith(("/", "~", ">", "#", "<")):
+        return False
+    if "://" in token or re.match(r"^[a-z0-9-]+(\.[a-z0-9-]+)+/", token):
+        return False  # URL or registry reference such as ghcr.io/owner/image
+    if TIMEZONE.match(token):
+        return False
+    if re.search(r"[^A-Za-z0-9._/{},-]", token):
+        return False
+    if "/" in token:
+        return True
+    name = token.rsplit("/", 1)[-1]
+    extension = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    return name in {"Containerfile", "Justfile"} or extension in PATH_EXTENSIONS
+
+
+def path_exists(rel: str) -> bool:
+    target = ROOT / rel
+    # A shipped symlink can point at something the base image provides (for
+    # example /etc/localtime -> zoneinfo), so being a symlink is enough.
+    return target.exists() or target.is_symlink()
+
+
+def table_tokens(rel: str, heading: str | None = None) -> set[str]:
+    """Backticked tokens from every table, or from the first column of one section."""
+    lines = read(rel).splitlines() if heading is None else section_lines(rel, heading)
+    tokens: set[str] = set()
+    for line in lines:
+        if not line.startswith("|"):
+            continue
+        cells = line.split("|")[1:-1] if heading is None else line.split("|")[1:2]
+        for cell in cells:
+            tokens.update(re.findall(r"`([^`]+)`", cell))
+    return tokens
+
+
 def check_doc_paths() -> None:
-    # The file maps are the part of the docs a reader follows literally, so a
-    # path in them has to resolve. Only the first (path) column is checked: the
-    # description column legitimately contains illustrative paths.
-    for rel, heading in (("README.md", "## Repository layout"), ("AGENTS.md", "## Map")):
+    # README: every table, because the changes table keeps its paths in the
+    # right-hand column. AGENTS.md: only the path column of the map, because its
+    # other tables use shorthand (`build.sh`, `60-custom.just`) on purpose.
+    for rel, heading, minimum in (
+        ("README.md", None, 10),
+        ("AGENTS.md", "## Map", 10),
+    ):
         if not (ROOT / rel).exists():
             check(f"{rel} exists", False)
             continue
         cited: set[str] = set()
-        for line in section_lines(rel, heading):
-            if not line.startswith("|"):
+        for token in table_tokens(rel, heading):
+            token = token.strip()
+            if token in ILLUSTRATIVE_PATHS or not looks_like_path(token):
                 continue
-            first_cell = line.split("|")[1]
-            for token in re.findall(r"`([^`]+)`", first_cell):
-                cited.update(expand_braces(token.strip().rstrip("/")))
-        check(f"{rel} map has paths to check", bool(cited), f"no table found under {heading}")
-        missing = sorted(
-            path
-            for path in cited
-            if path and not path.startswith(("/", "~")) and not (ROOT / path).exists()
+            cited.update(expand_braces(token.rstrip("/")))
+        where = "tables" if heading is None else "map"
+        check(
+            f"paths to check in {rel} {where}",
+            len(cited) >= minimum,
+            f"only {len(cited)} path(s) found",
         )
-        check(f"every path in the {rel} map exists", not missing, f"missing: {missing}")
+        missing = sorted(path for path in cited if path and not path_exists(path))
+        check(f"every path in the {rel} {where} exists", not missing, f"missing: {missing}")
 
     for rel in (
         "README.md",
@@ -387,8 +453,38 @@ def check_doc_paths() -> None:
         check(f"{rel} has no broken internal links", not broken, f"{broken}")
 
 
+def check_workflow_scripts() -> None:
+    """Every `run:` block must be valid bash, so a typo fails in a minute."""
+    try:
+        import yaml
+    except ModuleNotFoundError:
+        print("skip  workflow run blocks are valid bash — PyYAML is not installed (CI installs it)")
+        return
+    for path in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
+        rel = path.relative_to(ROOT)
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        broken: list[str] = []
+        checked = 0
+        for job in (doc.get("jobs") or {}).values():
+            for step in job.get("steps") or []:
+                script = step.get("run")
+                if not script:
+                    continue
+                checked += 1
+                # The shell parser must only see shell: expressions become a word.
+                body = re.sub(r"\$\{\{.*?\}\}", "EXPRESSION", script, flags=re.S)
+                result = subprocess.run(
+                    ["bash", "-n"], input=body, capture_output=True, text=True, check=False
+                )
+                if result.returncode != 0:
+                    first = (result.stderr.strip().splitlines() or ["syntax error"])[0]
+                    broken.append(f"{step.get('name', '<unnamed>')}: {first}")
+        check(f"{rel}: {checked} run blocks are valid bash", not broken, f"{broken}")
+
+
 def main() -> int:
     check_workflows()
+    check_workflow_scripts()
     check_pins()
     check_supply_chain()
     check_verification()

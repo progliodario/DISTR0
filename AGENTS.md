@@ -69,12 +69,14 @@ Each of these is load-bearing, and most are enforced by `just lint`:
   overlay on a read-only `/`: changing a file means a new image.
 - **Recipe bodies are bash**, so they must stay `bash -n`/`shellcheck` clean.
   Inside a recipe, `{{ ... }}` is Just interpolation, not shell — escape literal
-  braces as `{{ '{{' }}`.
+  braces as `{{ '{{' }}`. The `run:` blocks of every workflow are parsed the
+  same way by `validate.py`, with `${{ ... }}` replaced before the parse.
 - **Documentation may only point at things that exist.** `validate.py` checks
   the `just`/`ujust` names used in the README, this file, `CONTRIBUTING.md` and
-  the doc shipped inside the image against the Justfiles, every path in the
-  `README.md` file map and in the `## Map` table below, and every relative link
-  and in-page anchor in those documents.
+  the doc shipped inside the image against the Justfiles; every path cited in
+  any `README.md` table (the changes table keeps its paths in the right-hand
+  column, brace forms like `a/{b,c}` are expanded) and in the `## Map` table
+  below; and every relative link and in-page anchor in those documents.
 - **The result must stay a valid bootc image**: `bootc container lint` runs in
   the `Containerfile` and `build.sh` ends with smoke tests that fail the build
   rather than shipping a broken image.
