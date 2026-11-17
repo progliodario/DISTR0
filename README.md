@@ -29,7 +29,7 @@ apps, Homebrew for CLI tools, distrobox/toolbox for workloads).
 
 | Image | Base |
 | --- | --- |
-| `ghcr.io/progliodario/distr0:latest` | `ghcr.io/ublue-os/bluefin:stable` (pinned by digest) |
+| `ghcr.io/progliodario/distr0:latest` | `ghcr.io/ublue-os/bluefin:latest` (pinned by digest, Fedora 45) |
 
 Every build on `main` publishes `latest`, `latest.<YYYYMMDD>` and `<YYYYMMDD>`.
 Pull requests only publish `sha-<short>` and `pr-<n>` tags and never move
@@ -98,10 +98,12 @@ anaconda-iso images on demand (`workflow_dispatch`, default `amd64`).
 3. **Base image** — bump the digest in `Containerfile` on purpose:
 
    ```bash
-   skopeo inspect docker://ghcr.io/ublue-os/bluefin:stable | jq -r .Digest
+   skopeo inspect docker://ghcr.io/ublue-os/bluefin:latest | jq -r .Digest
    ```
 
-   Renovate opens this bump automatically.
+   Renovate opens this bump automatically. `bluefin:latest` tracks the current
+   Fedora release (45 today); `bluefin:stable` is the GTS stream and is still on
+   Fedora 44, which would be a major-version downgrade for this image.
 4. **Desktop / apps** — Flatpaks declared for first-boot install, CLI tools in a
    Brewfile, commands in `/usr/share/ublue-os/just/60-custom.just`. These are the
    next milestones, not wired up yet.
