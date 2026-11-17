@@ -12,6 +12,7 @@ on:
       platform:
         required: true
         type: choice
+        default: amd64
         options:
           - amd64
           - arm64
@@ -36,7 +37,9 @@ concurrency:
 jobs:
   build:
     name: Build disk images
-    runs-on: ${{ inputs.platform == 'amd64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+    # Default to amd64: on pull_request events `inputs.platform` is empty, and the
+    # published image is amd64-only, so an arm64 runner would fail the build.
+    runs-on: ${{ inputs.platform == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
@@ -61,7 +64,7 @@ jobs:
           echo "USER_GID=${USER_GID}" >> ${GITHUB_ENV}
 
       - name: Install dependencies
-        if: inputs.platform == 'arm64'
+        if: startsWith(runner.os, 'Linux') && runner.arch == 'ARM64'
         run: |
           set -x
           sudo apt update -y

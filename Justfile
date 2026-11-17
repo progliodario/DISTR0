@@ -1,4 +1,4 @@
-export image_name := env("IMAGE_NAME", "image-template") # output image name, usually same as repo name, change as needed
+export image_name := env("IMAGE_NAME", "distr0") # output image name, usually same as repo name, change as needed
 export default_tag := env("DEFAULT_TAG", "latest")
 export bib_image := env("BIB_IMAGE", "quay.io/centos-bootc/bootc-image-builder:latest")
 
@@ -80,9 +80,9 @@ sudoif command *args:
 # just build $target_image $tag
 #
 # Example usage:
-#   just build aurora lts
+# just build distr0 lts
 #
-# This will build an image 'aurora:lts' with DX and GDX enabled.
+# This will build an image 'distr0:lts'.
 #
 
 # Build the image using the specified parameters
@@ -292,7 +292,6 @@ spawn-vm rebuild="0" type="qcow2" ram="6G":
       --network-user-mode \
       --vsock=false --pass-ssh-key=false \
       -i ./output/**/*.{{ type }}
-
 
 # Runs shell check on all Bash scripts
 lint:
