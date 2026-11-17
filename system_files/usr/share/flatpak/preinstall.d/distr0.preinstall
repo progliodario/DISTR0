@@ -1,0 +1,24 @@
+# Flatpaks declared by DISTR0.
+#
+# Bluefin ships flatpak-preinstall.service, which runs `flatpak preinstall -y`
+# at boot and synchronizes the system installation with every *.preinstall file
+# in this directory. Adding an app here installs it; removing it here removes it
+# again (user-installed apps are never touched).
+#
+# `ujust distr0-apps` re-runs the same command on demand.
+
+[Flatpak Preinstall org.mozilla.firefox]
+Branch=stable
+IsRuntime=false
+
+[Flatpak Preinstall org.mozilla.Thunderbird]
+Branch=stable
+IsRuntime=false
+
+[Flatpak Preinstall org.libreoffice.LibreOffice]
+Branch=stable
+IsRuntime=false
+
+[Flatpak Preinstall org.videolan.VLC]
+Branch=stable
+IsRuntime=false

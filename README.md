@@ -13,10 +13,15 @@ sudo systemctl reboot
 
 DISTR0 inherits everything Bluefin ships: GNOME, `ujust`, Homebrew, Flatpak
 preinstall, `uupd` scheduled updates, HWE/NVIDIA variants and the container
-tooling. Its own delta is deliberately small:
+tooling. Its own delta:
 
 | Change | Where |
 | --- | --- |
+| Identity: `os-release` rebrand, wallpaper, `distr0-logo` | `build_files/build.sh`, `system_files/usr/share/{backgrounds,icons}` |
+| Italian defaults: locale `it_IT.UTF-8`, timezone `Europe/Rome`, console keymap `it2`, GNOME keyboard layout `it` | `system_files/etc/{locale.conf,vconsole.conf,localtime}`, `system_files/etc/dconf/db/distro.d/99-distr0-branding` |
+| GUI apps declared for first boot: Firefox, Thunderbird, LibreOffice, VLC | `system_files/usr/share/flatpak/preinstall.d/distr0.preinstall` |
+| CLI tools installed through Homebrew: `bottom`, `dust`, `lazygit`, `xh` | `system_files/usr/share/ublue-os/homebrew/preinstall.d/distr0-cli.Brewfile` |
+| `ujust distr0-*` commands | `system_files/usr/share/ublue-os/just/60-custom.just` |
 | `podman.socket` enabled by default | `build_files/build.sh` |
 | File overlay: everything in `system_files/` is copied to `/` | `Containerfile`, `build_files/build.sh` |
 | Base image pinned by digest for reproducible builds | `Containerfile` |
@@ -51,6 +56,38 @@ itself on the device. Enforcing it needs a `sigstoreSigned` scope in
 `/etc/containers/policy.json` plus a `registries.d` entry for this namespace;
 until that exists, updates are pulled as `ostree-unverified-image`.
 
+## Language, keyboard and timezone
+
+The image ships Italian defaults, without locking anyone in:
+
+```bash
+ujust distr0-lang                     # back to Italian (it_IT.UTF-8)
+ujust distr0-lang en_US.UTF-8         # or any locale the image carries
+localectl set-keymap it2              # console keymap
+```
+
+The GNOME keyboard layout (`it`) and the wallpaper come from
+`/etc/dconf/db/distro.d/99-distr0-branding`, compiled by Bluefin's
+`dconf-update.service`. `ujust distr0-reset-desktop` re-applies them after you
+change something by hand.
+
+## Applications
+
+GUI apps are declared, not baked in — the same mechanism Bluefin uses:
+
+- `/usr/share/flatpak/preinstall.d/distr0.preinstall` is read by the
+  `flatpak-preinstall.service` already shipped and enabled by Bluefin, so the
+  listed apps install on first boot (and are removed again if the declaration is
+  removed). `ujust distr0-apps` re-runs it on demand, which matters when the
+  first boot happens without a network connection.
+- `/usr/share/ublue-os/homebrew/preinstall.d/distr0-cli.Brewfile` is consumed by
+  Bluefin's `brew-preinstall.service`, which installs those Homebrew formulae on
+  first login and re-syncs them on every OS update. `ujust distr0-cli` installs
+  them immediately.
+
+Adding an app is one line in the corresponding list. `ujust bbrew` covers
+everything else on demand.
+
 ## Build locally
 
 Requirements: `podman`, `just`, `jq` (all shipped on bootc desktops), plus
@@ -82,8 +119,8 @@ anaconda-iso images on demand (`workflow_dispatch`, default `amd64`).
 | Path | Purpose |
 | --- | --- |
 | `Containerfile` | Image definition: base image (pinned) + `build.sh` + `bootc container lint` |
-| `build_files/build.sh` | The customization entrypoint: overlay, host packages, services |
-| `system_files/` | Tree mirrored onto `/` at build time (`system_files/etc/foo` → `/etc/foo`) |
+| `build_files/build.sh` | The customization entrypoint: overlay, packages, `os-release` rebrand, services, smoke tests |
+| `system_files/` | Tree mirrored onto `/` at build time (`system_files/etc/foo` → `/etc/foo`); symlinks are preserved |
 | `disk_config/` | bootc-image-builder configs for disk images and the installer ISO |
 | `Justfile` | Local build, VM and lint recipes |
 | `.github/workflows/` | CI: container image build/push/sign, disk image build |
@@ -104,9 +141,9 @@ anaconda-iso images on demand (`workflow_dispatch`, default `amd64`).
    Renovate opens this bump automatically. `bluefin:latest` tracks the current
    Fedora release (45 today); `bluefin:stable` is the GTS stream and is still on
    Fedora 44, which would be a major-version downgrade for this image.
-4. **Desktop / apps** — Flatpaks declared for first-boot install, CLI tools in a
-   Brewfile, commands in `/usr/share/ublue-os/just/60-custom.just`. These are the
-   next milestones, not wired up yet.
+4. **Branding** — the wallpaper and logo live under
+   `system_files/usr/share/{backgrounds,icons}`; the `os-release` strings are set
+   in `build_files/build.sh` so `VERSION_ID` keeps tracking the base image.
 
 ## ArtifactHub
 
@@ -119,8 +156,13 @@ it is replaced, the repository will not be verified on
 
 - `sudo bootc status` shows the booted and staged image; `sudo bootc rollback`
   returns to the previous deployment if an update misbehaves.
+- No Flatpaks after the first boot? `flatpak-preinstall.service` needs a network
+  connection; once you are online run `ujust distr0-apps`.
+- No `brew`? `brew-preinstall.service` runs at first graphical login; check
+  `systemctl --user status brew-preinstall.service`, then `ujust distr0-cli`.
 - A build that fails at `bootc container lint` means the resulting image is not a
-  valid bootc image — check the lint output above it.
+  valid bootc image — check the lint output above it. The smoke tests at the end
+  of `build.sh` fail fast when the overlay or the branding did not land.
 - `just clean` removes build artifacts (`output/`, `_build*`, manifests).
 
 ## Credits and licensing

@@ -8,5 +8,15 @@ image at build time, so a file placed in `system_files/etc/foo.conf` becomes
 `/etc/foo.conf`. Files are installed read-only: changing them means changing the
 repository and building a new image, not editing the running system.
 
+What this image adds on top of [Bluefin](https://projectbluefin.io/):
+
+- DISTR0 branding: `os-release` identity, wallpaper and `distr0-logo`
+- Italian defaults: `it_IT.UTF-8`, `Europe/Rome`, console keymap `it2`,
+  GNOME keyboard layout `it`
+- Flatpaks declared in `/usr/share/flatpak/preinstall.d/distr0.preinstall`
+- Homebrew formulae declared in
+  `/usr/share/ublue-os/homebrew/preinstall.d/distr0-cli.Brewfile`
+- `ujust distr0-*` commands, from `/usr/share/ublue-os/just/60-custom.just`
+
 DISTR0 is built on Bluefin, which is built on Fedora Atomic Desktops by the
 Universal Blue project.
