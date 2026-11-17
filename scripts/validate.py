@@ -309,6 +309,84 @@ def check_docs() -> None:
         )
 
 
+def section_lines(rel: str, heading: str) -> list[str]:
+    """Lines of one `## heading` section, without the heading itself."""
+    out: list[str] = []
+    inside = False
+    for line in read(rel).splitlines():
+        if line.startswith("## "):
+            inside = line.strip() == heading
+            continue
+        if inside:
+            out.append(line)
+    return out
+
+
+def expand_braces(token: str) -> list[str]:
+    """`a/{b,c}/d` -> `a/b/d`, `a/c/d`; anything else is returned unchanged."""
+    match = re.search(r"\{([^{}]*)\}", token)
+    if not match:
+        return [token]
+    return [
+        expanded
+        for part in match.group(1).split(",")
+        for expanded in expand_braces(token[: match.start()] + part + token[match.end() :])
+    ]
+
+
+def slug(heading: str) -> str:
+    text = heading.lstrip("# ").strip().lower()
+    return re.sub(r"[^a-z0-9 -]", "", text).replace(" ", "-")
+
+
+def check_doc_paths() -> None:
+    # The file maps are the part of the docs a reader follows literally, so a
+    # path in them has to resolve. Only the first (path) column is checked: the
+    # description column legitimately contains illustrative paths.
+    for rel, heading in (("README.md", "## Repository layout"), ("AGENTS.md", "## Map")):
+        if not (ROOT / rel).exists():
+            check(f"{rel} exists", False)
+            continue
+        cited: set[str] = set()
+        for line in section_lines(rel, heading):
+            if not line.startswith("|"):
+                continue
+            first_cell = line.split("|")[1]
+            for token in re.findall(r"`([^`]+)`", first_cell):
+                cited.update(expand_braces(token.strip().rstrip("/")))
+        check(f"{rel} map has paths to check", bool(cited), f"no table found under {heading}")
+        missing = sorted(
+            path
+            for path in cited
+            if path and not path.startswith(("/", "~")) and not (ROOT / path).exists()
+        )
+        check(f"every path in the {rel} map exists", not missing, f"missing: {missing}")
+
+    for rel in (
+        "README.md",
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "SECURITY.md",
+        "system_files/usr/share/doc/distr0/README.md",
+    ):
+        if not (ROOT / rel).exists():
+            continue
+        text = read(rel)
+        headings = {slug(h) for h in re.findall(r"^#{2,6} .*$", text, re.MULTILINE)}
+        broken: list[str] = []
+        for target in re.findall(r"\]\(([^)\s]+)\)", text):
+            if target.startswith(("http://", "https://", "mailto:")):
+                continue
+            if target.startswith("#"):
+                if target[1:].lower() not in headings:
+                    broken.append(target)
+                continue
+            path = target.split("#")[0].rstrip("/")
+            if path and not (ROOT / path).exists():
+                broken.append(target)
+        check(f"{rel} has no broken internal links", not broken, f"{broken}")
+
+
 def main() -> int:
     check_workflows()
     check_pins()
@@ -318,6 +396,7 @@ def main() -> int:
     check_defaults()
     check_recipes()
     check_docs()
+    check_doc_paths()
 
     print()
     if FAILURES:
