@@ -274,8 +274,23 @@ jobs:
           podman run --rm -v "${work}:/work:Z" -w /work \
             ghcr.io/anchore/syft@sha256:e97e20b6e6d1699c60296b66ab337941724f9bd06ac279d893eda89601fc4b2a \
             scan "oci-dir:/work/image" -o spdx-json=/work/sbom.spdx.json
-          cp "${work}/sbom.spdx.json" sbom.spdx.json
+          cp "${work}/sbom.spdx.json" sbom-full.spdx.json
+
+          # The attestation exists to answer "is this package in the image?", and
+          # cosign refuses to attach a layer over ~100 MB. syft's SPDX output also
+          # carries a hash of every file in the OS (105 MB here), so keep the
+          # packages and their relationships, drop the file inventory.
+          cat > "${work}/trim.jq" <<'JQ'
+          del(.files)
+          | .packages = [(.packages // [])[] | del(.hasFiles)]
+          | .relationships = [((.relationships // [])[])
+              | select((((.spdxElementId // "") | startswith("SPDXRef-File")) | not)
+                       and ((((.relatedSpdxElement // "") | startswith("SPDXRef-File")) | not)))]
+          JQ
+          jq -c -f "${work}/trim.jq" sbom-full.spdx.json > sbom.spdx.json
+          rm -f sbom-full.spdx.json
           jq -r '.packages | length' sbom.spdx.json | xargs -I{} echo "SBOM lists {} packages"
+          du -h sbom.spdx.json
 
       # This section is optional and only needs to be enabled if you plan on distributing
       # your project for others to consume. You will need to create a public and private key
