@@ -60,6 +60,18 @@ jobs:
           tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
           sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
 
+      # `just lint` skips actionlint, hadolint and the YAML checks when they are
+      # missing, which is right on a desktop and wrong in CI: a green job would
+      # not prove they ran. Fail loudly here instead.
+      - name: Every validator is available
+        run: |
+          set -xeuo pipefail
+          just --version
+          shellcheck --version
+          hadolint --version
+          actionlint --version
+          python3 -c 'import yaml; print("pyyaml", yaml.__version__)'
+
       - name: Just recipes are formatted
         run: just check
 
