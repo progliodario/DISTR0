@@ -306,8 +306,16 @@ jobs:
         run: |
           set -xeuo pipefail
           IMAGE_FULL="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"
-          cosign attest -y --key env://COSIGN_PRIVATE_KEY --type spdxjson \
-            --predicate sbom.spdx.json "${IMAGE_FULL}@${{ steps.push.outputs.digest }}"
+          # By tag, like the signature: the registry resolves it to the digest and
+          # an attestation is stored per digest, so one tag is enough.
+          ls -lh sbom.spdx.json
+          if ! output="$(cosign attest -y --key env://COSIGN_PRIVATE_KEY --type spdxjson \
+                 --predicate sbom.spdx.json "${IMAGE_FULL}:${DEFAULT_TAG}" 2>&1)"; then
+            echo "${output}"
+            echo "::error title=SBOM attestation::$(printf '%s' "${output}" | tail -n 4 | tr '\n' ' ' | cut -c1-800) | sbom $(du -h sbom.spdx.json | cut -f1)"
+            exit 1
+          fi
+          echo "${output}"
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
 
