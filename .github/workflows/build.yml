@@ -105,29 +105,40 @@ jobs:
           labels: ${{ steps.metadata.outputs.labels }}
           oci: false
 
-      # Rechunk is a script that we use on Universal Blue to make sure there isnt a single huge layer when your image gets published.
-      # This does not make your image faster to download, just provides better resumability and fixes a few errors.
-      # Documentation for Rechunk is provided on their github repository at https://github.com/hhd-dev/rechunk
-      # You can enable it by uncommenting the following lines:
-      # - name: Run Rechunker
-      #   id: rechunk
-      #   uses: ublue-os/legacy-rechunk@a925083d9af7cb04b3e2a6e8c01bfa495f38b710 # v1.0.0
-      #   with:
-      #     rechunk: 'ghcr.io/ublue-os/legacy-rechunk:v1.0.0-x86_64'
-      #     ref: "localhost/${{ env.IMAGE_NAME }}:${{ env.DEFAULT_TAG }}"
-      #     prev-ref: "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.DEFAULT_TAG }}"
-      #     skip_compression: true
-      #     version: ${{ env.CENTOS_VERSION }}
-      #     labels: ${{ steps.metadata.outputs.labels }} # Rechunk strips out all the labels during build, this needs to be reapplied here with newline separator
+      # Rechunk: rebuild the image with many small layers instead of one big
+      # build layer, so that `bootc upgrade` only downloads what actually
+      # changed. Same command as `just rechunk` locally (chunkah).
+      - name: Rechunk image
+        id: rechunk
+        run: |
+          set -xeuo pipefail
+          IMAGE="localhost/${IMAGE_NAME}:${DEFAULT_TAG}"
+          OUTPUT_DIR="$(mktemp -d "${PWD}/_chunkah_XXXXXX")"
+          CONFIG_FILE="$(mktemp)"
+          trap 'rm -f "${CONFIG_FILE}"' EXIT
 
-      # This is necessary so that the podman socket can find the rechunked image on its storage
-      # - name: Load in podman and tag
-      #   run: |
-      #     IMAGE=$(podman pull ${{ steps.rechunk.outputs.ref }})
-      #     sudo rm -rf ${{ steps.rechunk.outputs.output }}
-      #     for tag in ${{ steps.metadata.outputs.tags }}; do
-      #       podman tag $IMAGE ${{ env.IMAGE_NAME }}:$tag
-      #     done
+          podman inspect "${IMAGE}" > "${CONFIG_FILE}"
+
+          podman run --rm \
+            --mount=type=image,src="${IMAGE}",target=/chunkah \
+            -v "${CONFIG_FILE}:/chunkah-config.json:ro,Z" \
+            -v "${OUTPUT_DIR}:/run/out:Z" \
+            quay.io/coreos/chunkah:latest \
+            build \
+            --verbose \
+            --compressed \
+            --max-layers 128 \
+            --prune /sysroot/ \
+            --label ostree.commit- \
+            --label ostree.final-diffid- \
+            --config /chunkah-config.json \
+            --output oci:/run/out/chunked
+
+          CHUNKED_IMAGE="$(podman pull "oci:${OUTPUT_DIR}/chunked")"
+          for tag in ${{ steps.metadata.outputs.tags }}; do
+            podman tag "${CHUNKED_IMAGE}" "localhost/${IMAGE_NAME}:${tag}"
+          done
+          sudo rm -rf "${OUTPUT_DIR}"
 
       # These `if` statements are so that pull requests for your custom images do not make it publish any packages under your name without you knowing
       # They also check if the runner is on the default branch so that things like the merge queue (if you enable it), are going to work

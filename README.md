@@ -19,7 +19,7 @@ tooling. Its own delta:
 | --- | --- |
 | Identity: `os-release` rebrand, wallpaper, `distr0-logo` | `build_files/build.sh`, `system_files/usr/share/{backgrounds,icons}` |
 | Italian defaults: locale `it_IT.UTF-8`, timezone `Europe/Rome`, console keymap `it2`, GNOME keyboard layout `it` | `system_files/etc/{locale.conf,vconsole.conf,localtime}`, `system_files/etc/dconf/db/distro.d/99-distr0-branding` |
-| GUI apps declared for first boot: Firefox, Thunderbird, LibreOffice, VLC | `system_files/usr/share/flatpak/preinstall.d/distr0.preinstall` |
+| GUI apps declared for first boot: LibreOffice, VLC (Firefox, Thunderbird and Flatseal already belong to Bluefin's default set, so they are not duplicated) | `system_files/usr/share/flatpak/preinstall.d/distr0.preinstall` |
 | CLI tools installed through Homebrew: `bottom`, `dust`, `lazygit`, `xh` | `system_files/usr/share/ublue-os/homebrew/preinstall.d/distr0-cli.Brewfile` |
 | `ujust distr0-*` commands | `system_files/usr/share/ublue-os/just/60-custom.just` |
 | `podman.socket` enabled by default | `build_files/build.sh` |
@@ -40,6 +40,11 @@ Every build on `main` publishes `latest`, `latest.<YYYYMMDD>` and `<YYYYMMDD>`.
 Pull requests only publish `sha-<short>` and `pr-<n>` tags and never move
 `latest`.
 
+Images are rechunked with [chunkah](https://github.com/coreos/chunkah) in CI
+(`just rechunk` does the same locally): the build layer is split into up to 128
+smaller layers, so an update downloads only the parts that changed instead of a
+single multi-hundred-megabyte layer.
+
 ## Verify the image
 
 Images are signed with [cosign](https://docs.sigstore.dev/) using the key in
@@ -51,10 +56,30 @@ cosign verify \
   ghcr.io/progliodario/distr0:latest
 ```
 
-Known gap: the signature is verified by you and by CI, not yet by `bootc`
-itself on the device. Enforcing it needs a `sigstoreSigned` scope in
-`/etc/containers/policy.json` plus a `registries.d` entry for this namespace;
-until that exists, updates are pulled as `ostree-unverified-image`.
+## Verified updates on the device
+
+The image ships everything `bootc` needs to check that signature itself before
+applying an update:
+
+- `/usr/share/distr0/cosign.pub` — the public key (the same file as `cosign.pub`)
+- a `sigstoreSigned` scope for `ghcr.io/progliodario/distr0` merged into
+  `/etc/containers/policy.json` (merged with `jq`, never replaced, so the
+  policies the base image ships keep working)
+- `/etc/containers/registries.d/ghcr.io-progliodario.yaml` with
+  `use-sigstore-attachments: true`, so containers/image looks for the signature
+  next to the image in the registry
+
+That turns `--enforce-container-sigpolicy` on, which is what the installer ISO
+uses. A machine that was switched before this existed keeps its old
+`ostree-unverified-image` reference until it is switched again, once:
+
+```bash
+sudo bootc switch --enforce-container-sigpolicy \
+  ghcr.io/progliodario/distr0:latest
+```
+
+After that, `sudo bootc upgrade` refuses any image whose signature does not
+match the key — a bad or tampered update cannot land.
 
 ## Language, keyboard and timezone
 
@@ -79,7 +104,10 @@ GUI apps are declared, not baked in — the same mechanism Bluefin uses:
   `flatpak-preinstall.service` already shipped and enabled by Bluefin, so the
   listed apps install on first boot (and are removed again if the declaration is
   removed). `ujust distr0-apps` re-runs it on demand, which matters when the
-  first boot happens without a network connection.
+  first boot happens without a network connection. Only apps Bluefin does not
+  already ship belong here: Firefox, Thunderbird and Flatseal are part of
+  Bluefin's `system-flatpaks.Brewfile`, so declaring them again would install a
+  second copy (see `ujust install-system-flatpaks` for that full set).
 - `/usr/share/ublue-os/homebrew/preinstall.d/distr0-cli.Brewfile` is consumed by
   Bluefin's `brew-preinstall.service`, which installs those Homebrew formulae on
   first login and re-syncs them on every OS update. `ujust distr0-cli` installs

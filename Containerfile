@@ -2,6 +2,9 @@
 FROM scratch AS ctx
 COPY build_files /
 COPY system_files /system_files
+# The public half of the image signing key: installed into the image so that
+# bootc can verify future updates on the device.
+COPY cosign.pub /cosign.pub
 
 # Base Image
 # DISTR0 is built on Bluefin (Universal Blue / Fedora Atomic GNOME).

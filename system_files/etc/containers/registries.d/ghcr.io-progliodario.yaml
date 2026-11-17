@@ -1,0 +1,7 @@
+# cosign stores signatures next to the image in the registry
+# (sha256-<digest>.sig), so containers/image has to look for them there.
+# Without this, `bootc switch --enforce-container-sigpolicy` cannot find any
+# signature even though the image is signed.
+docker:
+  ghcr.io/progliodario:
+    use-sigstore-attachments: true

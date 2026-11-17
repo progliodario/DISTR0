@@ -79,7 +79,35 @@ systemctl enable podman.socket
 systemctl enable dconf-update.service
 
 # ---------------------------------------------------------------------------
-# 5. Smoke tests
+# 5. Verified updates
+# Teach containers/image that this repository's images are signed with the
+# DISTR0 key, so `bootc switch --enforce-container-sigpolicy` works and every
+# later `bootc upgrade` on such a deployment verifies the cosign signature
+# before pulling. The policy is merged, never replaced: the scopes the base
+# image ships (including Universal Blue's own key) stay untouched.
+# ---------------------------------------------------------------------------
+install -Dm0644 /ctx/cosign.pub /usr/share/distr0/cosign.pub
+
+policy=/etc/containers/policy.json
+if [[ ! -f "$policy" ]]; then
+    printf '{"default":[{"type":"insecureAcceptAnything"}],"transports":{}}\n' > "$policy"
+fi
+
+merged_policy="$(mktemp)"
+jq --arg key /usr/share/distr0/cosign.pub '
+    .transports = (.transports // {})
+    | .transports.docker = (.transports.docker // {})
+    | .transports.docker["ghcr.io/progliodario/distr0"] = [{
+        "type": "sigstoreSigned",
+        "keyPath": $key,
+        "signedIdentity": {"type": "matchRepository"}
+    }]
+' "$policy" > "$merged_policy"
+install -m0644 "$merged_policy" "$policy"
+rm -f "$merged_policy"
+
+# ---------------------------------------------------------------------------
+# 6. Smoke tests
 # Fail the build early if the overlay or the branding did not land, instead of
 # shipping an image that silently lost them.
 # ---------------------------------------------------------------------------
@@ -92,3 +120,7 @@ test -L /etc/localtime
 grep -q '^NAME="DISTR0"' /usr/lib/os-release
 grep -q '^LOGO=distr0-logo' /usr/lib/os-release
 grep -q '^LANG=it_IT.UTF-8' /etc/locale.conf
+test -f /usr/share/distr0/cosign.pub
+test -f /etc/containers/registries.d/ghcr.io-progliodario.yaml
+jq -e '.transports.docker["ghcr.io/progliodario/distr0"][0].type == "sigstoreSigned"' \
+    /etc/containers/policy.json > /dev/null

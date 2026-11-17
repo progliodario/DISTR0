@@ -293,6 +293,59 @@ spawn-vm rebuild="0" type="qcow2" ram="6G":
       --vsock=false --pass-ssh-key=false \
       -i ./output/**/*.{{ type }}
 
+# Split the image into many small layers so that updates download only what changed
+# Uses chunkah (https://github.com/coreos/chunkah). Run it on the image you just built.
+[group('Rechunk')]
+rechunk $target_image=image_name $tag=default_tag:
+    #!/usr/bin/env bash
+    set -xeuo pipefail
+
+    # chunkah is not pinned upstream yet; this mirrors the Universal Blue recipe
+    CONFIG_FILE="$(mktemp)"
+    OUTPUT_DIR="$(mktemp -d "${PWD}/_chunkah_XXXXXX")"
+    trap 'rm -f "${CONFIG_FILE}"; rm -rf "${OUTPUT_DIR}"' EXIT
+
+    podman inspect "${target_image}:${tag}" > "${CONFIG_FILE}"
+
+    podman run --rm \
+        --mount=type=image,src="${target_image}:${tag}",target=/chunkah \
+        -v "${CONFIG_FILE}:/chunkah-config.json:ro,Z" \
+        -v "${OUTPUT_DIR}:/run/out:Z" \
+        quay.io/coreos/chunkah:latest \
+        build \
+        --verbose \
+        --compressed \
+        --max-layers 128 \
+        --prune /sysroot/ \
+        --label ostree.commit- \
+        --label ostree.final-diffid- \
+        --config /chunkah-config.json \
+        --output oci:/run/out/chunked
+
+    CHUNKED_IMAGE="$(podman pull "oci:${OUTPUT_DIR}/chunked")"
+    podman tag "${CHUNKED_IMAGE}" "${target_image}:${tag}"
+
+# Split the image with rpm-ostree's compose build-chunked-oci (classic method)
+[group('Rechunk')]
+ostree-rechunk $target_image=image_name $tag=default_tag:
+    #!/usr/bin/env bash
+    set -xeuo pipefail
+
+    GRAPHROOT="$(podman info --format '{{ '{{.Store.GraphRoot}}' }}')"
+
+    podman run --rm --pull=never --privileged \
+        --mount=type=image,src="${target_image}:${tag}",target=/rpm-ostree \
+        --mount=type=bind,src="${GRAPHROOT}",target=/run/host-container-storage,rw \
+        --mount=type=tmpfs,target=/run/rpm-ostree-storage \
+        --entrypoint /usr/bin/rpm-ostree \
+        "${target_image}:${tag}" \
+        compose build-chunked-oci \
+        --max-layers 127 \
+        --format-version=2 \
+        --bootc \
+        --rootfs /rpm-ostree \
+        --output "containers-storage:[overlay@/run/host-container-storage+/run/rpm-ostree-storage]localhost/${target_image}:${tag}"
+
 # Runs shell check on all Bash scripts
 lint:
     #!/usr/bin/env bash

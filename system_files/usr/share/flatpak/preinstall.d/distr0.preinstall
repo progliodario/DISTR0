@@ -3,17 +3,16 @@
 # Bluefin ships flatpak-preinstall.service, which runs `flatpak preinstall -y`
 # at boot and synchronizes the system installation with every *.preinstall file
 # in this directory. Adding an app here installs it; removing it here removes it
-# again (user-installed apps are never touched).
+# again (apps you installed yourself are never touched).
 #
 # `ujust distr0-apps` re-runs the same command on demand.
-
-[Flatpak Preinstall org.mozilla.firefox]
-Branch=stable
-IsRuntime=false
-
-[Flatpak Preinstall org.mozilla.Thunderbird]
-Branch=stable
-IsRuntime=false
+#
+# Deliberately NOT declared here, because Bluefin already ships them in
+# /usr/share/ublue-os/homebrew/system-flatpaks.Brewfile (its default system
+# Flatpak set, installed by `ujust install-system-flatpaks`):
+#   org.mozilla.firefox, org.mozilla.Thunderbird, com.github.tchx84.Flatseal
+# Declaring them here as well would install a second, system-wide copy next to
+# the one Bluefin manages.
 
 [Flatpak Preinstall org.libreoffice.LibreOffice]
 Branch=stable
