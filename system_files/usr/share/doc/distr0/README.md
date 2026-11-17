@@ -20,6 +20,8 @@ What this image adds on top of [Bluefin](https://projectbluefin.io/):
 - Verified updates: images are signed, the signature is enforced through
   `/etc/containers/policy.json` with the key at `/usr/share/distr0/cosign.pub`,
   and `ujust distr0-verify` reports the state on this machine
+- A self-test of everything above: `/usr/share/distr0/selftest.sh`, or
+  `ujust distr0-doctor` for the same test plus deployment, failed units and disk
 
 DISTR0 is built on Bluefin, which is built on Fedora Atomic Desktops by the
 Universal Blue project.

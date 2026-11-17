@@ -19,7 +19,9 @@ cp -avf "/ctx/system_files/." /
 # Italian language support: the glibc langpack provides the it_IT.UTF-8 locale
 # set in /etc/locale.conf, the others are the Italian dictionaries.
 # ---------------------------------------------------------------------------
-dnf5 install -y \
+# `install_weak_deps=False` keeps the package set deterministic: a weak
+# dependency appearing upstream must not silently change what lands here.
+dnf5 install -y --setopt=install_weak_deps=False \
     glibc-langpack-it \
     hunspell-it \
     hyphen-it \
@@ -43,6 +45,18 @@ if [[ -z "$base_version_id" ]]; then
     exit 1
 fi
 
+# IMAGE_ID/IMAGE_VERSION are what modern bootc/Fedora tooling reads to identify
+# the image itself rather than the distribution it derives from. The version is
+# the base image's OSTREE_VERSION, which already tracks the build that produced
+# the rootfs; it is lower-case and inside [a-z0-9._-] as systemd requires.
+base_image_version="$(sed -n 's/^OSTREE_VERSION=//p' /usr/lib/os-release | head -n1)"
+base_image_version="${base_image_version//\"/}"
+base_image_version="${base_image_version//\'/}"
+if [[ -z "$base_image_version" ]]; then
+    echo "Could not read OSTREE_VERSION from /usr/lib/os-release" >&2
+    exit 1
+fi
+
 cp /usr/lib/os-release /tmp/os-release.base
 
 set_os_release() {
@@ -59,6 +73,8 @@ set_os_release NAME '"DISTR0"'
 set_os_release PRETTY_NAME "\"DISTR0 ${base_version_id} (Bluefin)\""
 set_os_release VARIANT '"DISTR0"'
 set_os_release VARIANT_ID 'distr0'
+set_os_release IMAGE_ID 'distr0'
+set_os_release IMAGE_VERSION "${base_image_version}"
 set_os_release LOGO 'distr0-logo'
 set_os_release HOME_URL '"https://github.com/progliodario/DISTR0"'
 set_os_release DOCUMENTATION_URL '"https://github.com/progliodario/DISTR0#readme"'
@@ -119,6 +135,8 @@ test -f /usr/share/ublue-os/just/60-custom.just
 test -L /etc/localtime
 grep -q '^NAME="DISTR0"' /usr/lib/os-release
 grep -q '^LOGO=distr0-logo' /usr/lib/os-release
+grep -q '^IMAGE_ID=distr0' /usr/lib/os-release
+grep -q '^IMAGE_VERSION=latest-4' /usr/lib/os-release
 grep -q '^LANG=it_IT.UTF-8' /etc/locale.conf
 test -f /usr/share/distr0/cosign.pub
 test -f /etc/containers/registries.d/ghcr.io-progliodario.yaml

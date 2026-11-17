@@ -94,6 +94,25 @@ jobs:
           sep-tags: " "
           sep-annotations: " "
 
+      # Keep the manifest of the image that is published right now, so the build
+      # can report what an update will actually download. Manifest only: no pull.
+      - name: Remember the published image
+        id: previous
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          set -xeuo pipefail
+          if ! command -v skopeo > /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends skopeo
+          fi
+          manifest="${RUNNER_TEMP}/previous-manifest.json"
+          if ! skopeo inspect --raw \
+                 "docker://${IMAGE_REGISTRY}/${IMAGE_NAME}:${DEFAULT_TAG}" > "${manifest}" 2> /dev/null; then
+            echo '{}' > "${manifest}"
+            echo "No published image yet, there is nothing to compare against."
+          fi
+          echo "manifest=${manifest}" >> "${GITHUB_OUTPUT}"
+
       - name: Build Image
         id: build_image
         uses: redhat-actions/buildah-build@7a95fa7ee0f02d552a32753e7414641a04307056 # v2
@@ -106,6 +125,24 @@ jobs:
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
           oci: false
+
+      # The image carries its own test. Static lint cannot tell whether the
+      # overlay, the policy merge or the declarations actually landed.
+      - name: Run the image self-test
+        run: |
+          set -xeuo pipefail
+          podman run --rm "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" /usr/share/distr0/selftest.sh
+
+      # Advisory on purpose: `--fatal-warnings` can fail on warnings that come
+      # from the base image, which this project does not control. Read the log,
+      # tighten the base or fix what is ours, and only then make it blocking.
+      - name: bootc container lint (advisory)
+        continue-on-error: true
+        run: |
+          set -xeuo pipefail
+          podman run --rm --security-opt label=disable \
+            "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" \
+            bootc container lint --fatal-warnings
 
       # Rechunk: rebuild the image with many small layers instead of one big
       # build layer, so that `bootc upgrade` only downloads what actually
@@ -167,6 +204,22 @@ jobs:
           username: ${{ env.REGISTRY_USER }}
           password: ${{ env.REGISTRY_PASSWORD }}
 
+      # An SBOM of the exact image that was pushed, from the local image so no
+      # registry round-trip can produce a different answer.
+      - name: Generate SBOM (syft, pinned by digest)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          set -xeuo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf "${work}"' EXIT
+          podman save --format oci-dir -o "${work}/image" \
+            "localhost/${IMAGE_NAME}:${DEFAULT_TAG}"
+          podman run --rm -v "${work}:/work:Z" -w /work \
+            ghcr.io/anchore/syft@sha256:e97e20b6e6d1699c60296b66ab337941724f9bd06ac279d893eda89601fc4b2a \
+            scan "oci-dir:/work/image" -o spdx-json=/work/sbom.spdx.json
+          cp "${work}/sbom.spdx.json" sbom.spdx.json
+          jq -r '.packages | length' sbom.spdx.json | xargs -I{} echo "SBOM lists {} packages"
+
       # This section is optional and only needs to be enabled if you plan on distributing
       # your project for others to consume. You will need to create a public and private key
       # using Cosign and save the private key as a repository secret in Github for this workflow
@@ -188,3 +241,31 @@ jobs:
           TAGS: ${{ steps.push.outputs.digest }}
           COSIGN_EXPERIMENTAL: false
           COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+
+      # The SBOM is signed by the same key as the image, so `verify-image.yml`
+      # can check that the inventory belongs to the image it describes.
+      - name: Attest the SBOM
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          set -xeuo pipefail
+          IMAGE_FULL="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"
+          cosign attest -y --key env://COSIGN_PRIVATE_KEY --type spdxjson \
+            --predicate sbom.spdx.json "${IMAGE_FULL}@${{ steps.push.outputs.digest }}"
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+
+      # What an existing installation will download to get this build. Written to
+      # the run summary; the README quotes numbers measured this way.
+      - name: Measure layer reuse
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          set -xeuo pipefail
+          current="${RUNNER_TEMP}/current-manifest.json"
+          skopeo inspect --raw "docker://${IMAGE_REGISTRY}/${IMAGE_NAME}:${DEFAULT_TAG}" > "${current}"
+          if [[ "$(cat "${{ steps.previous.outputs.manifest }}")" == '{}' ]]; then
+            echo 'No previous image: this is the first build.' >> "${GITHUB_STEP_SUMMARY}"
+          else
+            python3 scripts/layer-diff.py \
+              "${{ steps.previous.outputs.manifest }}" "${current}" \
+              --summary "${GITHUB_STEP_SUMMARY}"
+          fi

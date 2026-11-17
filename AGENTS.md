@@ -80,6 +80,10 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 - **The result must stay a valid bootc image**: `bootc container lint` runs in
   the `Containerfile` and `build.sh` ends with smoke tests that fail the build
   rather than shipping a broken image.
+- **The self-test is the contract.** `/usr/share/distr0/selftest.sh` ships inside
+  the image and asserts what the image promises; `just test` and
+  `ujust distr0-doctor` both run it. Adding a promise to the README without a
+  check there means it is unverified.
 
 ## Map
 
@@ -91,11 +95,15 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 | `system_files/usr/share/flatpak/preinstall.d/distr0.preinstall` | GUI apps installed on first boot |
 | `system_files/usr/share/ublue-os/homebrew/preinstall.d/distr0-cli.Brewfile` | CLI tools installed on first login |
 | `system_files/usr/share/ublue-os/just/60-custom.just` | `ujust distr0-*` recipes, run on the device |
+| `system_files/usr/share/distr0/selftest.sh` | The image's own test: identity, overlay, policy, declarations, units |
+| `tests/test_validate.py` | Unit tests for the checker itself (`just test-unit`) |
+| `.github/copilot-instructions.md` | Symlink to `AGENTS.md`, so every agent reads one file |
 | `system_files/etc/containers/` | Update-verification policy (`policy.json` scope + `registries.d`) |
 | `disk_config/` | bootc-image-builder inputs; `iso.toml` also carries the installer's `bootc switch` |
 | `Justfile` | Everything you run on the build host |
 | `scripts/validate.py` | Cross-file invariants; the source of truth for `just lint` |
-| `.github/workflows/build.yml` | Build → rechunk → push → sign on `main` (and weekly) |
+| `scripts/layer-diff.py` | What an update downloads, from two image manifests |
+| `.github/workflows/build.yml` | Build → self-test → rechunk → push → sign → SBOM attestation on `main` (and weekly) |
 | `.github/workflows/validate.yml` | `just check` + `just lint`, in about a minute |
 | `.github/workflows/verify-image.yml` | Weekly: the published image must pass the shipped policy and fail with another key |
 | `.github/workflows/build-disk.yml` | qcow2 / raw / ISO on demand |
@@ -109,6 +117,7 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 | Add a GUI app | One `[Flatpak Preinstall <app-id>]` block in `distr0.preinstall` |
 | Add a CLI tool | One `brew "<formula>"` line in `distr0-cli.Brewfile` |
 | Add a device command | A recipe in `60-custom.just`, then mention it in the README |
+| Verify a built image | `just test` (self-test in a container); `just test-unit` for the checker |
 | Bump the base or chunkah | `just check-updates`, then edit the digest in place |
 | Change branding | `build.sh` for `os-release`, `system_files/usr/share/{backgrounds,icons}` for art |
 | Change where the installer points | `disk_config/iso.toml` |
@@ -139,8 +148,12 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 
 ## What CI proves, and what only a machine can
 
-CI proves: the image builds, is rechunked, is signed, and that the signature
-verifies with `cosign.pub` and is enforced against a throwaway key
-(`verify-image.yml`). It cannot prove what the boot process does on real
-hardware — Flatpak synchronization at boot, `brew-preinstall`, dconf defaults.
-If you claim one of those works, say it was not verified here.
+CI proves: the image builds, the shipped self-test passes inside it, the image is
+rechunked, it is signed, the signature verifies with `cosign.pub` and is enforced
+against a throwaway key (`verify-image.yml`), and the SBOM attestation verifies
+too. `bootc container lint --fatal-warnings` runs advisory: read its log instead
+of assuming green.
+
+CI cannot prove what the boot process does on real hardware — Flatpak
+synchronization at boot, `brew-preinstall`, dconf defaults. If you claim one of
+those works, say it was not verified here.

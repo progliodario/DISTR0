@@ -357,8 +357,17 @@ lint:
         echo "shellcheck could not be found. Please install it."
         exit 1
     fi
-    # Run shellcheck on all Bash scripts
-    /usr/bin/find . -iname "*.sh" -type f -exec shellcheck "{}" ';'
+    # Run shellcheck on all Bash scripts. `find -exec cmd \;` swallows the exit
+    # status of cmd, so the status is collected explicitly; otherwise lint would
+    # pass while shellcheck was reporting errors.
+    shellcheck_status=0
+    while IFS= read -r script; do
+        shellcheck "${script}" || shellcheck_status=1
+    done < <(/usr/bin/find . -iname "*.sh" -type f)
+    if [[ ${shellcheck_status} -ne 0 ]]; then
+        echo "shellcheck reported problems" >&2
+        exit 1
+    fi
     # Cross-file consistency: image pins, signature policy, declared apps
     python3 scripts/validate.py
     # The Containerfile linter, when it is installed
@@ -432,3 +441,25 @@ check-updates:
         printf '\nNothing to do: every pin still matches the registry.\n'
     fi
     exit "${moved}"
+
+# Run the image self-test in a container, building the image first if needed
+[group('Test')]
+test $target_image=image_name $tag=default_tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    image="${target_image}:${tag}"
+    if ! podman image exists "${image}"; then
+        just build "${target_image}" "${tag}"
+    fi
+    podman run --rm "${image}" /usr/share/distr0/selftest.sh
+
+# Run the unit tests for the repository's own tooling
+[group('Test')]
+test-unit:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v pytest > /dev/null; then
+        echo "pytest is required: python3 -m pip install pytest" >&2
+        exit 1
+    fi
+    pytest -q tests

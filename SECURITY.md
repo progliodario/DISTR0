@@ -34,6 +34,11 @@ repository's CI, and a wrong or tampered image will not land. It is not an audit
 of the content — that is what the package sources, the pinned base digest and
 review of `main` are for.
 
+The SBOM attestation is signed with the same key and proves something narrower:
+this inventory was produced for this image by this repository's CI. It is useful
+for answering "is this package in the image?" and for tracking a CVE, and it is
+not a statement that the packages are free of vulnerabilities.
+
 ## Trust boundaries
 
 Anything merged to `main` is built and published automatically. Protect, in this

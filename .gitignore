@@ -3,3 +3,6 @@ _build_*
 _chunkah_*
 output
 _build-*/**
+sbom.spdx.json
+__pycache__/
+.pytest_cache/

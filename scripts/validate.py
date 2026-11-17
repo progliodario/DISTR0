@@ -230,13 +230,15 @@ def check_recipes() -> None:
         "distr0-reset-desktop",
         "distr0-lang",
         "distr0-verify",
+        "distr0-doctor",
+        "distr0-rollback",
     ):
         check(
             f"60-custom.just defines {recipe}",
             re.search(rf"^{recipe}\b", custom, re.MULTILINE) is not None,
         )
     justfile = read("Justfile")
-    for recipe in ("build", "rechunk", "lint", "check-updates"):
+    for recipe in ("build", "rechunk", "lint", "check-updates", "test", "test-unit"):
         check(
             f"Justfile defines {recipe}",
             re.search(rf"^{recipe}\b", justfile, re.MULTILINE) is not None,
@@ -258,6 +260,69 @@ COMMAND = r"([a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9])(?![\w*-])"
 
 # Recipes that Bluefin ships and we only point at; they are not in 60-custom.just.
 UPSTREAM_UJUST = {"bbrew"}
+
+
+def check_image_promises() -> None:
+    """The promises the image makes about itself, checked against the sources."""
+    build = read("build_files/build.sh")
+    check(
+        "build.sh sets IMAGE_ID to distr0",
+        re.search(r"^set_os_release IMAGE_ID '?distr0'?$", build, re.MULTILINE) is not None,
+    )
+    check("build.sh sets IMAGE_VERSION from the base image", "set_os_release IMAGE_VERSION" in build)
+    check("build.sh keeps OSTREE_VERSION from the base", "OSTREE_VERSION" in build)
+    check(
+        "build.sh installs packages without weak dependencies",
+        "install_weak_deps=False" in build,
+        "reproducibility: a new weak dependency upstream must not change the image",
+    )
+
+    selftest = ROOT / "system_files/usr/share/distr0/selftest.sh"
+    check("the image ships a self-test", selftest.is_file())
+    if selftest.is_file():
+        text = selftest.read_text(encoding="utf-8")
+        check(
+            "the self-test is executable",
+            bool(selftest.stat().st_mode & 0o111),
+            "chmod +x system_files/usr/share/distr0/selftest.sh",
+        )
+        for claim in ("IMAGE_ID", "sigstoreSigned", "distr0-doctor"):
+            check(f"the self-test asserts {claim}", claim in text)
+    check(
+        "`just test` runs the self-test",
+        "selftest.sh" in read("Justfile"),
+        "the recipe exists but no longer runs the shipped test",
+    )
+    check("tests/test_validate.py exists", (ROOT / "tests/test_validate.py").is_file())
+
+
+def check_delivery() -> None:
+    """What the workflows must keep doing for the published image."""
+    build = read(".github/workflows/build.yml")
+    check("CI runs the image self-test", "selftest.sh" in build)
+    check(
+        "CI generates an SBOM with syft pinned by digest",
+        re.search(r"anchore/syft@sha256:[0-9a-f]{64}", build) is not None,
+    )
+    check("CI attests the SBOM", "cosign attest" in build)
+    check("CI measures layer reuse", "layer-diff.py" in build)
+    check("CI keeps the bootc lint advisory", "continue-on-error: true" in build)
+
+    verify = read(".github/workflows/verify-image.yml")
+    check("CI verifies the SBOM attestation", "cosign verify-attestation" in verify)
+    check(
+        "the attestation check pins cosign",
+        re.search(r"cosign-installer@[0-9a-f]{40}", verify) is not None,
+    )
+
+    check("scripts/layer-diff.py exists", (ROOT / "scripts/layer-diff.py").is_file())
+    copilot = ROOT / ".github/copilot-instructions.md"
+    check(
+        "copilot instructions are the same file as AGENTS.md",
+        copilot.is_symlink() and copilot.readlink() == Path("AGENTS.md"),
+        "ln -sfn AGENTS.md .github/copilot-instructions.md",
+    )
+    check(".gitignore ignores generated SBOMs", "sbom.spdx.json" in read(".gitignore"))
 
 
 def check_docs() -> None:
@@ -491,6 +556,8 @@ def main() -> int:
     check_declarations()
     check_defaults()
     check_recipes()
+    check_image_promises()
+    check_delivery()
     check_docs()
     check_doc_paths()
 

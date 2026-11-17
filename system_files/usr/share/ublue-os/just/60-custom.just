@@ -11,6 +11,7 @@ distr0-info:
     . /etc/os-release
     printf 'DISTR0\n'
     printf '  OS:       %s\n' "${PRETTY_NAME:-unknown}"
+    printf '  Image:    %s %s\n' "${IMAGE_ID:-unknown}" "${IMAGE_VERSION:-unknown}"
     printf '  Kernel:   %s\n' "$(uname -r)"
     printf '  Locale:   %s\n' "${LANG:-unset}"
     printf '  Timezone: %s\n' "$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')"
@@ -18,6 +19,13 @@ distr0-info:
         "$(flatpak list --system --app --columns=application 2>/dev/null | wc -l)" \
         "$(flatpak list --user --app --columns=application 2>/dev/null | wc -l)"
     printf '  Brew:     %s\n' "$(command -v brew || echo 'not installed')"
+    update_timer='no timer'
+    for unit in uupd.timer bootc-fetch-apply-updates.timer; do
+        if systemctl is-enabled --quiet "${unit}" 2>/dev/null; then
+            update_timer="${unit}"
+        fi
+    done
+    printf '  Updates:  %s\n' "${update_timer}"
     printf '\n'
     sudo bootc status | sed -n '1,25p'
 
@@ -117,3 +125,45 @@ distr0-verify:
             printf '  deployment:  %s\n' "${ref}"
             ;;
     esac
+
+# Run the image self-test, the deployment state and the usual suspects in one go
+[group('DISTR0')]
+distr0-doctor:
+    #!/usr/bin/env bash
+    set -uo pipefail
+
+    failed=0
+
+    printf '=== contents\n'
+    /usr/share/distr0/selftest.sh || failed=1
+
+    printf '\n=== deployment\n'
+    sudo bootc status | sed -n '1,14p'
+
+    printf '\n=== failed units\n'
+    systemctl --failed --no-legend --no-pager || true
+
+    printf '\n=== software the image declares\n'
+    for unit in flatpak-preinstall.service brew-preinstall.service; do
+        printf '  %-28s %s\n' "${unit}" "$(systemctl is-active "${unit}" 2>/dev/null || true)"
+    done
+
+    printf '\n=== disk\n'
+    df -h / /var 2>/dev/null || df -h /
+
+    exit "${failed}"
+
+# Return the machine to the previous deployment (staged until the next reboot)
+[group('DISTR0')]
+distr0-rollback:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    printf 'This stages a rollback to the previous deployment.\n'
+    read -r -p 'Continue? [y/N] ' reply
+    if [[ ! "${reply}" =~ ^[yY]$ ]]; then
+        echo 'Nothing done.'
+        exit 0
+    fi
+    sudo bootc rollback
+    echo 'Rollback staged. Reboot to use it: sudo systemctl reboot'
