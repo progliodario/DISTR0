@@ -107,7 +107,8 @@ jobs:
 
       # Rechunk: rebuild the image with many small layers instead of one big
       # build layer, so that `bootc upgrade` only downloads what actually
-      # changed. Same command as `just rechunk` locally (chunkah).
+      # changed. Same command as `just rechunk` locally (chunkah, pinned by
+      # digest; multi-arch index, so amd64 and arm64 both resolve).
       - name: Rechunk image
         id: rechunk
         run: |
@@ -123,7 +124,7 @@ jobs:
             --mount=type=image,src="${IMAGE}",target=/chunkah \
             -v "${CONFIG_FILE}:/chunkah-config.json:ro,Z" \
             -v "${OUTPUT_DIR}:/run/out:Z" \
-            quay.io/coreos/chunkah:latest \
+            quay.io/coreos/chunkah@sha256:71e593421c5de7dcc7c8c5c50e98d3bac572055a76f399f61a491d123c20a523 \
             build \
             --verbose \
             --compressed \

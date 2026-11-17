@@ -300,7 +300,8 @@ rechunk $target_image=image_name $tag=default_tag:
     #!/usr/bin/env bash
     set -xeuo pipefail
 
-    # chunkah is not pinned upstream yet; this mirrors the Universal Blue recipe
+    # chunkah is pinned by digest like every other image input: bump it on purpose
+    #   skopeo inspect docker://quay.io/coreos/chunkah:latest | jq -r .Digest
     CONFIG_FILE="$(mktemp)"
     OUTPUT_DIR="$(mktemp -d "${PWD}/_chunkah_XXXXXX")"
     trap 'rm -f "${CONFIG_FILE}"; rm -rf "${OUTPUT_DIR}"' EXIT
@@ -311,7 +312,7 @@ rechunk $target_image=image_name $tag=default_tag:
         --mount=type=image,src="${target_image}:${tag}",target=/chunkah \
         -v "${CONFIG_FILE}:/chunkah-config.json:ro,Z" \
         -v "${OUTPUT_DIR}:/run/out:Z" \
-        quay.io/coreos/chunkah:latest \
+        quay.io/coreos/chunkah@sha256:71e593421c5de7dcc7c8c5c50e98d3bac572055a76f399f61a491d123c20a523 \
         build \
         --verbose \
         --compressed \
