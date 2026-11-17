@@ -68,11 +68,31 @@ jobs:
           set -xeuo pipefail
           df -h /
           base="$(grep -oE 'ghcr\.io/ublue-os/bluefin:[^@]+@sha256:[0-9a-f]{64}' Containerfile | head -n1)"
-          if ! podman pull --retry 5 --retry-delay 10 "docker://${base}"; then
-            echo "::error title=Base image pull::podman could not pull ${base}"
-            df -h /
-            exit 1
+
+          # The error that matters is the one the client prints, so it goes into
+          # the annotation: the job log needs permissions this repository's own
+          # automation does not have.
+          annotate() {
+            echo "::error title=Base image pull::$(printf '%s' "$1" | tail -n 4 | tr '\n' ' ' | cut -c1-900) | $(df -h / | tail -1)"
+          }
+
+          if output="$(podman pull --retry 5 --retry-delay 10 "docker://${base}" 2>&1)"; then
+            echo "${output}"
+            exit 0
           fi
+          echo "${output}"
+          annotate "${output}"
+
+          if ! command -v skopeo > /dev/null; then
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends skopeo
+          fi
+          if output="$(skopeo copy --retry-times 5 "docker://${base}" "containers-storage:${base}" 2>&1)"; then
+            echo "${output}"
+            exit 0
+          fi
+          echo "${output}"
+          annotate "${output}"
+          exit 1
 
       - name: Get current date
         id: date
