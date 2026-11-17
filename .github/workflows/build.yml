@@ -63,35 +63,33 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor,
+      # which rootless buildah/podman need: without this, pulls and builds fail
+      # with "Error during unshare(...): Operation not permitted".
+      - name: Allow rootless containers
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Pull the pinned base image
         run: |
           set -xeuo pipefail
           df -h /
           base="$(grep -oE 'ghcr\.io/ublue-os/bluefin:[^@]+@sha256:[0-9a-f]{64}' Containerfile | head -n1)"
 
-          # The error that matters is the one the client prints, so it goes into
-          # the annotation: the job log needs permissions this repository's own
-          # automation does not have.
-          annotate() {
-            echo "::error title=Base image pull::$(printf '%s' "$1" | tail -n 4 | tr '\n' ' ' | cut -c1-900) | $(df -h / | tail -1)"
-          }
-
-          if output="$(podman pull --retry 5 --retry-delay 10 "docker://${base}" 2>&1)"; then
+          # Five tries, done here rather than in buildah: the client's own error is
+          # the one worth keeping, and something has to retry.
+          for attempt in 1 2 3 4 5; do
+            if output="$(podman pull "docker://${base}" 2>&1)"; then
+              echo "${output}"
+              exit 0
+            fi
+            echo "attempt ${attempt} failed:"
             echo "${output}"
-            exit 0
-          fi
-          echo "${output}"
-          annotate "${output}"
+            sleep 10
+          done
 
-          if ! command -v skopeo > /dev/null; then
-            sudo apt-get update && sudo apt-get install -y --no-install-recommends skopeo
-          fi
-          if output="$(skopeo copy --retry-times 5 "docker://${base}" "containers-storage:${base}" 2>&1)"; then
-            echo "${output}"
-            exit 0
-          fi
-          echo "${output}"
-          annotate "${output}"
+          # The failure goes into an annotation: the job log needs permissions
+          # this repository's own automation does not have.
+          echo "::error title=Base image pull::$(printf '%s' "${output}" | tail -n 4 | tr '\n' ' ' | cut -c1-900) | $(df -h / | tail -1)"
           exit 1
 
       - name: Get current date
