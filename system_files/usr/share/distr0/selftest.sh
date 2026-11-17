@@ -130,13 +130,11 @@ case ${scope} in
     *) bad 'the scope points at the shipped key' "${scope:-empty}" ;;
 esac
 
-default_type="$(jq -r '.default[0].type // empty' "${policy}" 2> /dev/null)"
-compare 'the policy default is still insecureAcceptAnything' "${default_type}" insecureAcceptAnything
-# Whether the base image shipped two scopes or twenty is its business; the build
-# fails if the merge ever loses one, so this is a number worth printing, not a
-# second place to assert it.
+# The default entry belongs to the base image, and build.sh proves it survives
+# the merge by comparing it before and after. Here it is context, not a claim.
+policy_default="$(jq -r '.default[0].type // "none"' "${policy}" 2> /dev/null)"
 policy_scopes="$(jq -r '.transports.docker | length' "${policy}" 2> /dev/null || echo 0)"
-printf 'note  %s policy scopes are registered in total\n' "${policy_scopes:-0}"
+printf 'note  policy default %s, %s scopes registered\n' "${policy_default:-none}" "${policy_scopes:-0}"
 
 expect 'registries.d enables sigstore attachments' grep -q 'use-sigstore-attachments: *true' "${registries}"
 

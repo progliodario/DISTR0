@@ -111,6 +111,7 @@ fi
 
 # What the base image ships, measured before the merge: the merge must only add.
 base_scope_count="$(jq -r '.transports.docker // {} | length' "$policy")"
+base_default="$(jq -c '.default // null' "$policy")"
 merged_policy="$(mktemp)"
 jq --arg key /usr/share/distr0/cosign.pub '
     .transports = (.transports // {})
@@ -127,6 +128,14 @@ rm -f "$merged_policy"
 merged_scope_count="$(jq -r '.transports.docker | length' "$policy")"
 if [[ ${merged_scope_count} -le ${base_scope_count} ]]; then
     echo "The policy merge lost scopes: ${base_scope_count} -> ${merged_scope_count}" >&2
+    exit 1
+fi
+
+# The default entry is the base image's decision, whatever it is; the merge must
+# leave it exactly as it was.
+merged_default="$(jq -c '.default // null' "$policy")"
+if [[ ${merged_default} != "${base_default}" ]]; then
+    echo "The policy merge changed the default entry: ${base_default} -> ${merged_default}" >&2
     exit 1
 fi
 
@@ -150,5 +159,4 @@ test -f /usr/share/distr0/cosign.pub
 test -f /etc/containers/registries.d/ghcr.io-progliodario.yaml
 jq -e '.transports.docker["ghcr.io/progliodario/distr0"][0].type == "sigstoreSigned"' \
     /etc/containers/policy.json > /dev/null
-jq -e '.default[0].type == "insecureAcceptAnything"' \
-    /etc/containers/policy.json > /dev/null
+
