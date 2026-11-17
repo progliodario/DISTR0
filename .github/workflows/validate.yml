@@ -1,0 +1,60 @@
+---
+# Fast checks that never build the image. Recipes, shell scripts, the
+# Containerfile and the settings duplicated across files (pins, policies,
+# declared apps) are verified in about a minute, so a mistake shows up here
+# instead of ten minutes later inside a full image build.
+name: Validate
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JUST_VERSION: "1.59.0"
+  PYYAML_VERSION: "6.0.3"
+  HADOLINT_VERSION: "2.15.1"
+  HADOLINT_SHA256: "c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507"
+
+jobs:
+  lint:
+    name: Lint configuration
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install validators
+        # A venv rather than `pip install --user`: Ubuntu marks its system Python
+        # as externally managed. Its bin/ goes first in PATH so both `just` and
+        # `python3` (with PyYAML) are the pinned ones for the later steps.
+        run: |
+          set -xeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+          python3 -m venv "${RUNNER_TEMP}/tools"
+          "${RUNNER_TEMP}/tools/bin/pip" install --disable-pip-version-check --quiet \
+            "rust-just==${JUST_VERSION}" "pyyaml==${PYYAML_VERSION}"
+          echo "${RUNNER_TEMP}/tools/bin" >> "${GITHUB_PATH}"
+          curl -fsSL -o /tmp/hadolint \
+            "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-x86_64"
+          echo "${HADOLINT_SHA256}  /tmp/hadolint" | sha256sum -c -
+          sudo install -m 0755 /tmp/hadolint /usr/local/bin/hadolint
+
+      - name: Just recipes are formatted
+        run: just check
+
+      - name: Configuration is consistent
+        run: just lint

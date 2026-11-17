@@ -347,7 +347,7 @@ ostree-rechunk $target_image=image_name $tag=default_tag:
         --rootfs /rpm-ostree \
         --output "containers-storage:[overlay@/run/host-container-storage+/run/rpm-ostree-storage]localhost/${target_image}:${tag}"
 
-# Runs shell check on all Bash scripts
+# Runs shellcheck on the Bash scripts plus the cross-file checks in scripts/validate.py
 lint:
     #!/usr/bin/env bash
     set -eoux pipefail
@@ -358,6 +358,12 @@ lint:
     fi
     # Run shellcheck on all Bash scripts
     /usr/bin/find . -iname "*.sh" -type f -exec shellcheck "{}" ';'
+    # Cross-file consistency: image pins, signature policy, declared apps
+    python3 scripts/validate.py
+    # The Containerfile linter, when it is installed
+    if command -v hadolint &> /dev/null; then
+        hadolint Containerfile
+    fi
 
 # Runs shfmt on all Bash scripts
 format:
@@ -370,3 +376,52 @@ format:
     fi
     # Run shfmt on all Bash scripts
     /usr/bin/find . -iname "*.sh" -type f -exec shfmt --write "{}" ';'
+
+# Report whether the pinned upstream digests (base image, chunkah) have moved; exits non-zero when one is stale
+[group('Utility')]
+check-updates:
+    #!/usr/bin/env bash
+    set -uo pipefail
+
+    if ! command -v skopeo >/dev/null; then
+        echo "skopeo is required (it ships with the image)" >&2
+        exit 1
+    fi
+
+    moved=0
+
+    report() {
+        local label="$1" repo="$2" tag="$3" pinned="$4"
+        local live
+        if [[ -z "${pinned}" ]]; then
+            printf '  %-14s no pin found, check the repository\n' "${label}"
+            return
+        fi
+        live="$(skopeo inspect "docker://${repo}:${tag}" 2>/dev/null | jq -r '.Digest // empty')"
+        if [[ -z "${live}" ]]; then
+            printf '  %-14s could not query %s:%s\n' "${label}" "${repo}" "${tag}"
+            return
+        fi
+        if [[ "${live}" == "${pinned}" ]]; then
+            printf '  %-14s up to date %s\n' "${label}" "${pinned:0:19}..."
+        else
+            printf '  %-14s moved %s... -> %s...\n' "${label}" "${pinned:0:19}" "${live:0:19}"
+            moved=1
+        fi
+    }
+
+    base_pin="$(grep -oE 'ghcr\.io/ublue-os/bluefin:[^@]+@sha256:[0-9a-f]{64}' Containerfile | head -n1 | sed 's/.*@//')"
+    chunkah_pin="$(grep -oE 'quay\.io/coreos/chunkah@sha256:[0-9a-f]{64}' Justfile | head -n1 | sed 's/.*@//')"
+
+    printf 'DISTR0 pins\n'
+    report 'bluefin base' 'ghcr.io/ublue-os/bluefin' 'latest' "${base_pin}"
+    report 'chunkah' 'quay.io/coreos/chunkah' 'latest' "${chunkah_pin}"
+
+    if [[ "${moved}" -eq 1 ]]; then
+        printf '\nBump the moved pin in Containerfile (base) or Justfile and\n'
+        printf '.github/workflows/build.yml (chunkah). The new digest comes from:\n'
+        printf '  skopeo inspect docker://<image> | jq -r .Digest\n'
+    else
+        printf '\nNothing to do: every pin still matches the registry.\n'
+    fi
+    exit "${moved}"

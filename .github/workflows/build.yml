@@ -5,7 +5,9 @@ on:
     branches:
       - main
   schedule:
-    - cron: '05 10 * * *'  # 10:05am UTC everyday
+    # Weekly: the base image is pinned by digest, so a rebuild only republishes
+    # the same content. Pushing a changed pin still builds immediately.
+    - cron: '05 10 * * 1'  # 10:05am UTC every Monday
   push:
     branches:
       - main

@@ -38,7 +38,10 @@ apps, Homebrew for CLI tools, distrobox/toolbox for workloads).
 
 Every build on `main` publishes `latest`, `latest.<YYYYMMDD>` and `<YYYYMMDD>`.
 Pull requests only publish `sha-<short>` and `pr-<n>` tags and never move
-`latest`.
+`latest`. The scheduled rebuild runs weekly: because the base image is pinned by
+digest, a rebuild republishes the same content — bumping the pin is what brings
+new upstream packages in (see
+[Keeping the pins current](#keeping-the-pins-current)).
 
 Images are rechunked with [chunkah](https://github.com/coreos/chunkah), pinned by
 digest, in CI
@@ -82,6 +85,11 @@ sudo bootc switch --enforce-container-sigpolicy \
 After that, `sudo bootc upgrade` refuses any image whose signature does not
 match the key — a bad or tampered update cannot land.
 
+`ujust distr0-verify` reports all of this on the running system: which key and
+policy are installed, and whether the booted deployment is an
+`ostree-image-signed` reference (updates verified) or still an unverified one,
+in which case it prints the switch command.
+
 ## Language, keyboard and timezone
 
 The image ships Italian defaults, without locking anyone in:
@@ -119,8 +127,9 @@ everything else on demand.
 
 ## Build locally
 
-Requirements: `podman`, `just`, `jq` (all shipped on bootc desktops), plus
-`shellcheck`/`shfmt` if you want `just lint` / `just format`.
+Requirements: `podman`, `just`, `jq`, `skopeo` (all shipped on bootc desktops).
+`just lint` needs `shellcheck`; `pyyaml` and `hadolint` enable its extra checks
+(CI installs all three). `just check` verifies the recipe syntax on its own.
 
 ```bash
 just build                                            # -> localhost/distr0:latest
@@ -142,6 +151,9 @@ The installer ISO points the installed system at `ghcr.io/progliodario/distr0`
 On GitHub, `.github/workflows/build.yml` builds, signs and pushes the image on
 every push to `main`, and `.github/workflows/build-disk.yml` builds qcow2 and
 anaconda-iso images on demand (`workflow_dispatch`, default `amd64`).
+`.github/workflows/validate.yml` runs `just check` and `just lint` on every push
+and pull request, so a broken recipe or a drifted setting is caught in a minute
+instead of ten minutes into an image build.
 
 ## Repository layout
 
@@ -151,8 +163,9 @@ anaconda-iso images on demand (`workflow_dispatch`, default `amd64`).
 | `build_files/build.sh` | The customization entrypoint: overlay, packages, `os-release` rebrand, services, smoke tests |
 | `system_files/` | Tree mirrored onto `/` at build time (`system_files/etc/foo` → `/etc/foo`); symlinks are preserved |
 | `disk_config/` | bootc-image-builder configs for disk images and the installer ISO |
-| `Justfile` | Local build, VM and lint recipes |
-| `.github/workflows/` | CI: container image build/push/sign, disk image build |
+| `Justfile` | Local build, VM, lint (`just lint`) and pin (`just check-updates`) recipes |
+| `scripts/validate.py` | Cross-file consistency checks, run by `just lint` and CI |
+| `.github/workflows/` | CI: image build/push/sign, disk images, fast validation |
 | `cosign.pub` | Public key used to verify published images |
 
 ## Customizing
@@ -167,12 +180,30 @@ anaconda-iso images on demand (`workflow_dispatch`, default `amd64`).
    skopeo inspect docker://ghcr.io/ublue-os/bluefin:latest | jq -r .Digest
    ```
 
-   Renovate opens this bump automatically. `bluefin:latest` tracks the current
+   Renovate opens this bump automatically, and `just check-updates` reports
+   whether the pin (or the chunkah one) has moved. `bluefin:latest` tracks the current
    Fedora release (45 today); `bluefin:stable` is the GTS stream and is still on
    Fedora 44, which would be a major-version downgrade for this image.
 4. **Branding** — the wallpaper and logo live under
    `system_files/usr/share/{backgrounds,icons}`; the `os-release` strings are set
    in `build_files/build.sh` so `VERSION_ID` keeps tracking the base image.
+
+## Keeping the pins current
+
+Two external images are pinned by digest — the Bluefin base in `Containerfile`,
+and chunkah in `Justfile` and the build workflow — so every build starts from
+byte-identical inputs and an upstream push cannot change what lands on the
+device. The cost is that a pin never moves on its own. To check:
+
+```bash
+just check-updates    # exits non-zero when a pin is stale
+```
+
+It compares both pins with the registry and prints the
+`skopeo inspect docker://<image> | jq -r .Digest` line to copy. Renovate (see
+`.github/renovate.json5`) opens the base-image bump as a pull request when the
+app is installed on the repository; Dependabot keeps the GitHub Actions versions
+current.
 
 ## ArtifactHub
 
