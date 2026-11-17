@@ -291,8 +291,11 @@ jobs:
         if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         run: |
           IMAGE_FULL="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"
+          # No transparency-log upload: the devices verify this signature against
+          # the key in /etc/containers/policy.json, which does not consult Rekor,
+          # so a public service being down must not decide whether a build ships.
           for tag in ${{ steps.metadata.outputs.tags }}; do
-            cosign sign -y --key env://COSIGN_PRIVATE_KEY $IMAGE_FULL:$tag
+            cosign sign -y --tlog-upload=false --key env://COSIGN_PRIVATE_KEY "${IMAGE_FULL}:${tag}"
           done
         env:
           TAGS: ${{ steps.push.outputs.digest }}
@@ -309,8 +312,10 @@ jobs:
           # By tag, like the signature: the registry resolves it to the digest and
           # an attestation is stored per digest, so one tag is enough.
           ls -lh sbom.spdx.json
-          if ! output="$(cosign attest -y --key env://COSIGN_PRIVATE_KEY --type spdxjson \
-                 --predicate sbom.spdx.json "${IMAGE_FULL}:${DEFAULT_TAG}" 2>&1)"; then
+          # Same reasoning as the signature: key-based verification on the device,
+          # no Rekor dependency in the build.
+          if ! output="$(cosign attest -y --tlog-upload=false --key env://COSIGN_PRIVATE_KEY \
+                 --type spdxjson --predicate sbom.spdx.json "${IMAGE_FULL}:${DEFAULT_TAG}" 2>&1)"; then
             echo "${output}"
             echo "::error title=SBOM attestation::$(printf '%s' "${output}" | tail -n 4 | tr '\n' ' ' | cut -c1-800) | sbom $(du -h sbom.spdx.json | cut -f1)"
             exit 1
