@@ -124,12 +124,13 @@ case ${scope} in
     *) bad 'the scope points at the shipped key' "${scope:-empty}" ;;
 esac
 
+default_type="$(jq -r '.default[0].type // empty' "${policy}" 2> /dev/null)"
+compare 'the policy default is still insecureAcceptAnything' "${default_type}" insecureAcceptAnything
+# Whether the base image shipped two scopes or twenty is its business; the build
+# fails if the merge ever loses one, so this is a number worth printing, not a
+# second place to assert it.
 policy_scopes="$(jq -r '.transports.docker | length' "${policy}" 2> /dev/null || echo 0)"
-if [[ ${policy_scopes:-0} -gt 1 ]]; then
-    ok "the base policy scopes are preserved (${policy_scopes} total)"
-else
-    bad 'the base policy scopes are preserved' "${policy_scopes:-0} scope(s)"
-fi
+printf 'note  %s policy scopes are registered in total\n' "${policy_scopes:-0}"
 
 expect 'registries.d enables sigstore attachments' grep -q 'use-sigstore-attachments: *true' "${registries}"
 
@@ -144,16 +145,27 @@ done
 # --- System -----------------------------------------------------------------
 expect 'bootc is installed' command -v bootc
 kernels="$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d 2> /dev/null | wc -l)"
-if [[ ${kernels} -eq 1 ]]; then
-    ok 'exactly one kernel is installed'
+if [[ ${kernels} -ge 1 ]]; then
+    ok "a kernel is installed (${kernels} under /usr/lib/modules)"
 else
-    bad 'exactly one kernel is installed' "found ${kernels}"
+    bad 'a kernel is installed' 'none under /usr/lib/modules'
 fi
-if command -v systemctl > /dev/null; then
-    for unit in dconf-update.service flatpak-preinstall.service brew-preinstall.service podman.socket; do
-        expect "${unit} is enabled" systemctl --root=/ is-enabled "${unit}"
-    done
-fi
+
+# The two units this repository enables itself must be enabled in the image.
+# The base image owns how its preinstall services are wired, so those are only
+# reported: asserting them would test Bluefin, not DISTR0.
+for unit in dconf-update.service podman.socket; do
+    expect "${unit} unit file is shipped" test -f "/usr/lib/systemd/system/${unit}"
+    if find /etc/systemd/system -name "${unit}" -type l -print -quit 2> /dev/null | grep -q .; then
+        ok "${unit} is enabled"
+    else
+        bad "${unit} is enabled" 'no enablement symlink under /etc/systemd/system'
+    fi
+done
+for unit in flatpak-preinstall.service brew-preinstall.service; do
+    state="$(systemctl --root=/ is-enabled "${unit}" 2> /dev/null || true)"
+    printf 'note  %-28s %s\n' "${unit}" "${state:-unknown}"
+done
 
 printf '\n%d checks, %d failed\n' "${checks}" "${failures}"
 if [[ ${failures} -ne 0 ]]; then

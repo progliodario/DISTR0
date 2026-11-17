@@ -109,6 +109,8 @@ if [[ ! -f "$policy" ]]; then
     printf '{"default":[{"type":"insecureAcceptAnything"}],"transports":{}}\n' > "$policy"
 fi
 
+# What the base image ships, measured before the merge: the merge must only add.
+base_scope_count="$(jq -r '.transports.docker // {} | length' "$policy")"
 merged_policy="$(mktemp)"
 jq --arg key /usr/share/distr0/cosign.pub '
     .transports = (.transports // {})
@@ -121,6 +123,12 @@ jq --arg key /usr/share/distr0/cosign.pub '
 ' "$policy" > "$merged_policy"
 install -m0644 "$merged_policy" "$policy"
 rm -f "$merged_policy"
+
+merged_scope_count="$(jq -r '.transports.docker | length' "$policy")"
+if [[ ${merged_scope_count} -le ${base_scope_count} ]]; then
+    echo "The policy merge lost scopes: ${base_scope_count} -> ${merged_scope_count}" >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 6. Smoke tests
@@ -141,4 +149,6 @@ grep -q '^LANG=it_IT.UTF-8' /etc/locale.conf
 test -f /usr/share/distr0/cosign.pub
 test -f /etc/containers/registries.d/ghcr.io-progliodario.yaml
 jq -e '.transports.docker["ghcr.io/progliodario/distr0"][0].type == "sigstoreSigned"' \
+    /etc/containers/policy.json > /dev/null
+jq -e '.default[0].type == "insecureAcceptAnything"' \
     /etc/containers/policy.json > /dev/null

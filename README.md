@@ -91,8 +91,9 @@ cosign verify-attestation \
 
 - `just test` — `/usr/share/distr0/selftest.sh` inside the built image: the
   identity fields, the shipped files, the signature policy and key, the declared
-  Flatpaks and formulae, the enabled units and that one kernel is installed. It
-  runs on pull requests too, before the image is rechunked.
+  Flatpaks and formulae, the units this repository enables itself, and that a
+  kernel is installed. It runs on pull requests too, before the image is
+  rechunked.
 - `bootc container lint --fatal-warnings` — advisory for now: a warning that
   comes from the base image must not stop the pipeline, so the step reports and
   the log gets read (see `AGENTS.md`).
