@@ -26,6 +26,8 @@ env:
   PYYAML_VERSION: "6.0.3"
   HADOLINT_VERSION: "2.15.1"
   HADOLINT_SHA256: "c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507"
+  ACTIONLINT_VERSION: "1.7.9"
+  ACTIONLINT_SHA256: "233b280d05e100837f4af1433c7b40a5dcb306e3aa68fb4f17f8a7f45a7df7b4"
 
 jobs:
   lint:
@@ -52,6 +54,11 @@ jobs:
             "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-x86_64"
           echo "${HADOLINT_SHA256}  /tmp/hadolint" | sha256sum -c -
           sudo install -m 0755 /tmp/hadolint /usr/local/bin/hadolint
+          curl -fsSL -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
 
       - name: Just recipes are formatted
         run: just check

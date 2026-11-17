@@ -365,6 +365,10 @@ lint:
     if command -v hadolint &> /dev/null; then
         hadolint Containerfile
     fi
+    # Workflow semantics (expressions, action inputs), when it is installed
+    if command -v actionlint &> /dev/null; then
+        actionlint -shellcheck= -pyflakes= .github/workflows/*.yml
+    fi
 
 # Runs shfmt on all Bash scripts
 format:

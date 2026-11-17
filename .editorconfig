@@ -1,0 +1,36 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Trailing spaces are meaningful in Markdown (hard line breaks).
+[*.md]
+trim_trailing_whitespace = false
+
+[*.{yml,yaml,json,json5}]
+indent_style = space
+indent_size = 2
+
+# just --fmt owns the layout of these files.
+[Justfile]
+indent_style = space
+indent_size = 4
+
+[*.just]
+indent_style = space
+indent_size = 4
+
+[*.{sh,bash}]
+indent_style = space
+indent_size = 4
+
+[*.py]
+indent_style = space
+indent_size = 4
+
+[*.toml]
+indent_style = space
+indent_size = 2

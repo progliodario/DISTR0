@@ -9,6 +9,14 @@ sudo bootc switch --transport registry ghcr.io/progliodario/distr0:latest
 sudo systemctl reboot
 ```
 
+## Documentation
+
+| File | For |
+| --- | --- |
+| [AGENTS.md](AGENTS.md) | Invariants, file map, recipes for common changes and the failure playbook. Read this before changing anything, whether you are a new maintainer or an AI agent (`CLAUDE.md` is a symlink to it). |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, the verification loop, pull request checklist |
+| [SECURITY.md](SECURITY.md) | Reporting a vulnerability, the trust model, signing-key rotation |
+
 ## What DISTR0 changes compared to its base
 
 DISTR0 inherits everything Bluefin ships: GNOME, `ujust`, Homebrew, Flatpak
@@ -137,8 +145,9 @@ everything else on demand.
 ## Build locally
 
 Requirements: `podman`, `just`, `jq`, `skopeo` (all shipped on bootc desktops).
-`just lint` needs `shellcheck`; `pyyaml` and `hadolint` enable its extra checks
-(CI installs all three). `just check` verifies the recipe syntax on its own.
+`just lint` needs `shellcheck`; `pyyaml`, `hadolint` and `actionlint` enable its
+extra checks (CI installs all of them, pinned and checksum-verified). `just check`
+verifies the recipe syntax on its own.
 
 ```bash
 just build                                            # -> localhost/distr0:latest

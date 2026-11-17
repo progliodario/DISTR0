@@ -242,6 +242,73 @@ def check_recipes() -> None:
         )
 
 
+def recipe_names(rel: str) -> set[str]:
+    names: set[str] = set()
+    for line in read(rel).splitlines():
+        match = re.match(r"^([a-zA-Z_][a-zA-Z0-9_-]*)(?:\s[^:]*)?:", line)
+        if match:
+            names.add(match.group(1))
+    return names
+
+
+# A command reference ends in a letter or digit and is not the prefix of a glob,
+# so `ujust distr0-*` (prose) is not mistaken for a recipe name.
+COMMAND = r"([a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9])(?![\w*-])"
+
+# Recipes that Bluefin ships and we only point at; they are not in 60-custom.just.
+UPSTREAM_UJUST = {"bbrew"}
+
+
+def check_docs() -> None:
+    agents = ROOT / "AGENTS.md"
+    check("AGENTS.md exists", agents.exists())
+    claude = ROOT / "CLAUDE.md"
+    check(
+        "CLAUDE.md is a symlink to AGENTS.md",
+        claude.is_symlink() and claude.resolve() == agents.resolve(),
+        "one source of truth beats two copies that drift",
+    )
+    for rel in (".editorconfig", ".gitattributes", ".github/PULL_REQUEST_TEMPLATE.md"):
+        check(f"{rel} exists", (ROOT / rel).exists())
+    if not agents.exists():
+        return
+
+    text = read("AGENTS.md")
+    for topic in ("## Invariants", "## Map", "just lint", "just check"):
+        check(f"AGENTS.md documents {topic}", topic in text)
+
+    just_recipes = recipe_names("Justfile") | set(
+        re.findall(r"^alias\s+([a-zA-Z0-9_-]+)\s*:=", read("Justfile"), re.MULTILINE)
+    )
+    ujust_recipes = recipe_names("system_files/usr/share/ublue-os/just/60-custom.just")
+
+    for rel in (
+        "README.md",
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "SECURITY.md",
+        "system_files/usr/share/doc/distr0/README.md",
+    ):
+        if not (ROOT / rel).exists():
+            check(f"{rel} exists", False)
+            continue
+        doc = read(rel)
+        named_just = set(re.findall(rf"`just {COMMAND}", doc))
+        named_just |= set(re.findall(rf"^(?:sudo )?just {COMMAND}", doc, re.MULTILINE))
+        named_ujust = set(re.findall(rf"`ujust {COMMAND}", doc))
+        named_ujust |= set(re.findall(rf"^(?:sudo )?ujust {COMMAND}", doc, re.MULTILINE))
+        check(
+            f"{rel} only mentions real just recipes",
+            named_just <= just_recipes,
+            f"{sorted(named_just - just_recipes)}",
+        )
+        check(
+            f"{rel} only mentions real ujust recipes",
+            named_ujust <= ujust_recipes | UPSTREAM_UJUST,
+            f"{sorted(named_ujust - ujust_recipes - UPSTREAM_UJUST)}",
+        )
+
+
 def main() -> int:
     check_workflows()
     check_pins()
@@ -250,6 +317,7 @@ def main() -> int:
     check_declarations()
     check_defaults()
     check_recipes()
+    check_docs()
 
     print()
     if FAILURES:

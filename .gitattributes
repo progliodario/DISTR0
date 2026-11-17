@@ -1,0 +1,14 @@
+# Normalize line endings on check-out everywhere; the image and the workflows
+# only ever see LF.
+* text=auto eol=lf
+
+*.png binary
+
+# Scripts and recipes must keep LF, otherwise `bash` and `just` break on Windows
+# check-outs.
+*.sh text eol=lf
+Justfile text eol=lf
+*.just text eol=lf
+*.py text eol=lf
+
+*.md text eol=lf
