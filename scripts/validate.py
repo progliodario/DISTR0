@@ -113,6 +113,50 @@ def check_pins() -> None:
     check("Justfile and CI use the same chunkah digest", len(refs) == 1, f"{sorted(refs)}")
 
 
+def check_supply_chain() -> None:
+    # A branch can move under us between builds, so actions are pinned to a
+    # commit SHA; the tag/version lives in the comment next to it.
+    for path in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
+        rel = path.relative_to(ROOT)
+        unpinned: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            match = re.search(r"^\s*-?\s*uses:\s*(\S+)", line)
+            if match and not re.match(r"^[^@]+@[0-9a-f]{40}$", match.group(1)):
+                unpinned.append(match.group(1))
+        check(f"{rel} pins every action to a commit SHA", not unpinned, f"{unpinned}")
+
+    workflow = read(".github/workflows/build-disk.yml")
+    justfile = read("Justfile")
+    in_workflow = re.search(r"bootc-image-builder@(sha256:[0-9a-f]{64})", workflow)
+    in_justfile = re.search(r"bootc-image-builder@(sha256:[0-9a-f]{64})", justfile)
+    check(
+        "build-disk.yml pins bootc-image-builder by digest",
+        in_workflow is not None,
+        "expected quay.io/centos-bootc/bootc-image-builder@sha256:…",
+    )
+    check(
+        "Justfile pins bootc-image-builder by digest",
+        in_justfile is not None,
+        "expected quay.io/centos-bootc/bootc-image-builder@sha256:…",
+    )
+    if in_workflow and in_justfile:
+        check(
+            "workflow and Justfile use the same bootc-image-builder digest",
+            in_workflow.group(1) == in_justfile.group(1),
+            f"{in_workflow.group(1)} vs {in_justfile.group(1)}",
+        )
+
+    verify = ROOT / ".github/workflows/verify-image.yml"
+    check("verify-image.yml exists", verify.exists())
+    if verify.exists():
+        text = verify.read_text(encoding="utf-8")
+        check(
+            "verify-image.yml uses the registries.d file the image ships",
+            "system_files/etc/containers/registries.d" in text,
+            "it must test the shipped file, not a copy of it",
+        )
+
+
 def check_verification() -> None:
     build = read("build_files/build.sh")
     check(
@@ -201,6 +245,7 @@ def check_recipes() -> None:
 def main() -> int:
     check_workflows()
     check_pins()
+    check_supply_chain()
     check_verification()
     check_declarations()
     check_defaults()

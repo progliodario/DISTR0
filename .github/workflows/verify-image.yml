@@ -1,0 +1,91 @@
+---
+# The build workflow proves the image is signed. This proves the signature is
+# actually *enforced*, using the same code path `bootc switch`/`bootc upgrade`
+# takes on the device: containers/image applies the trust policy and looks for
+# sigstore attachments in the registry. It pulls the whole image, so it runs
+# weekly instead of on every push.
+name: Verify published image
+
+on:
+  schedule:
+    - cron: '15 12 * * 1'  # Monday 12:15 UTC, after the 10:05 weekly build
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
+  # The scope this image ships in /etc/containers/policy.json
+  POLICY_SCOPE: ghcr.io/progliodario/distr0
+  # The registries.d directory this image ships (sigstore attachments on)
+  REGISTRIES_D: system_files/etc/containers/registries.d
+
+jobs:
+  enforce:
+    name: Policy accepts the signed image and refuses another key
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install skopeo
+        run: |
+          set -xeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends skopeo
+          skopeo --version
+
+      - name: Write the two trust policies
+        run: |
+          set -xeuo pipefail
+          # The shipped scope, with the key path made local: the image points at
+          # /usr/share/distr0/cosign.pub, which does not exist on a runner.
+          policy() {
+            jq -n --arg key "$1" --arg scope "${POLICY_SCOPE}" '
+              {
+                default: [{type: "insecureAcceptAnything"}],
+                transports: {docker: {
+                  ($scope): [{
+                    type: "sigstoreSigned",
+                    keyPath: $key,
+                    signedIdentity: {type: "matchRepository"}
+                  }]
+                }}
+              }'
+          }
+          policy "$(realpath cosign.pub)" > "${RUNNER_TEMP}/good.json"
+          # A throwaway key, standing in for a signature this project did not make.
+          openssl ecparam -genkey -name prime256v1 -noout -out "${RUNNER_TEMP}/other.key"
+          openssl ec -in "${RUNNER_TEMP}/other.key" -pubout -out "${RUNNER_TEMP}/other.pub" 2>/dev/null
+          policy "${RUNNER_TEMP}/other.pub" > "${RUNNER_TEMP}/bad.json"
+
+      # The published image is a single-arch manifest today, so the digest cosign
+      # signed is the digest skopeo pulls. Make this an index copy (or verify the
+      # index digest explicitly) if the build ever produces a multi-arch index.
+      - name: The signed image is accepted
+        run: |
+          set -xeuo pipefail
+          skopeo --policy "${RUNNER_TEMP}/good.json" \
+                 --registries.d "${REGISTRIES_D}" \
+                 copy --retry-times 2 "docker://${IMAGE}" "dir:${RUNNER_TEMP}/accepted"
+          echo "Verified with the key the image ships."
+
+      - name: An image signed by another key is refused
+        run: |
+          set -xeuo pipefail
+          if skopeo --policy "${RUNNER_TEMP}/bad.json" \
+                    --registries.d "${REGISTRIES_D}" \
+                    copy --retry-times 1 "docker://${IMAGE}" "dir:${RUNNER_TEMP}/refused" \
+                    > "${RUNNER_TEMP}/refused.log" 2>&1; then
+            echo "::error::the policy accepted an image this key did not sign"
+            exit 1
+          fi
+          cat "${RUNNER_TEMP}/refused.log"
+          echo "Refused as expected."

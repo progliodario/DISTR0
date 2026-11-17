@@ -1,6 +1,6 @@
 export image_name := env("IMAGE_NAME", "distr0") # output image name, usually same as repo name, change as needed
 export default_tag := env("DEFAULT_TAG", "latest")
-export bib_image := env("BIB_IMAGE", "quay.io/centos-bootc/bootc-image-builder:latest")
+export bib_image := env("BIB_IMAGE", "quay.io/centos-bootc/bootc-image-builder@sha256:dab86ee6b46dcade411b37f4e70b07d93b6a06da0dbfec6fe89247a220e0d9f8")
 
 alias build-vm := build-qcow2
 alias rebuild-vm := rebuild-qcow2
@@ -39,6 +39,7 @@ clean:
     set -eoux pipefail
     touch _build
     find *_build* -exec rm -rf {} \;
+    find _chunkah_* -exec rm -rf {} \;
     rm -f previous.manifest.json
     rm -f changelog.md
     rm -f output.env
@@ -412,10 +413,12 @@ check-updates:
 
     base_pin="$(grep -oE 'ghcr\.io/ublue-os/bluefin:[^@]+@sha256:[0-9a-f]{64}' Containerfile | head -n1 | sed 's/.*@//')"
     chunkah_pin="$(grep -oE 'quay\.io/coreos/chunkah@sha256:[0-9a-f]{64}' Justfile | head -n1 | sed 's/.*@//')"
+    bib_pin="$(grep -oE 'bootc-image-builder@sha256:[0-9a-f]{64}' .github/workflows/build-disk.yml | head -n1 | sed 's/.*@//')"
 
     printf 'DISTR0 pins\n'
     report 'bluefin base' 'ghcr.io/ublue-os/bluefin' 'latest' "${base_pin}"
     report 'chunkah' 'quay.io/coreos/chunkah' 'latest' "${chunkah_pin}"
+    report 'disk image' 'quay.io/centos-bootc/bootc-image-builder' 'latest' "${bib_pin}"
 
     if [[ "${moved}" -eq 1 ]]; then
         printf '\nBump the moved pin in Containerfile (base) or Justfile and\n'

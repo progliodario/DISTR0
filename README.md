@@ -90,6 +90,15 @@ policy are installed, and whether the booted deployment is an
 `ostree-image-signed` reference (updates verified) or still an unverified one,
 in which case it prints the switch command.
 
+### The policy is tested, not just declared
+
+`.github/workflows/verify-image.yml` runs weekly (or on demand) and pulls the
+published image through `skopeo` — the same containers/image libraries `bootc`
+uses — with the `registries.d` file and the policy scope this repository ships.
+It runs twice: with [`cosign.pub`](cosign.pub) the copy must succeed, with a
+throwaway key it must be refused. That is the enforcement `bootc upgrade` relies
+on, exercised against the real registry instead of asserted in prose.
+
 ## Language, keyboard and timezone
 
 The image ships Italian defaults, without locking anyone in:
@@ -145,6 +154,10 @@ just build-iso      # output/bootiso/install.iso
 just run-vm-qcow2   # boots the qcow2 in a browser VM on http://localhost:8006
 ```
 
+The disk-image build pins both sides of its toolchain — the action by commit and
+the builder image `BIB_IMAGE` by digest — in the workflow and in the `Justfile`,
+so an ISO is as reproducible as the container image.
+
 The installer ISO points the installed system at `ghcr.io/progliodario/distr0`
 (see `disk_config/iso.toml`).
 
@@ -165,7 +178,7 @@ instead of ten minutes into an image build.
 | `disk_config/` | bootc-image-builder configs for disk images and the installer ISO |
 | `Justfile` | Local build, VM, lint (`just lint`) and pin (`just check-updates`) recipes |
 | `scripts/validate.py` | Cross-file consistency checks, run by `just lint` and CI |
-| `.github/workflows/` | CI: image build/push/sign, disk images, fast validation |
+| `.github/workflows/` | CI: image build/push/sign, disk images, fast validation, weekly policy enforcement test |
 | `cosign.pub` | Public key used to verify published images |
 
 ## Customizing
@@ -190,16 +203,18 @@ instead of ten minutes into an image build.
 
 ## Keeping the pins current
 
-Two external images are pinned by digest — the Bluefin base in `Containerfile`,
-and chunkah in `Justfile` and the build workflow — so every build starts from
-byte-identical inputs and an upstream push cannot change what lands on the
-device. The cost is that a pin never moves on its own. To check:
+Three external images are pinned by digest — the Bluefin base in `Containerfile`,
+chunkah in `Justfile` and the build workflow, and bootc-image-builder in the
+disk workflow and the `Justfile` — and every GitHub Action is pinned to a commit
+SHA. So each build starts from byte-identical inputs and an upstream push cannot
+change what lands on the device. The cost is that a pin never moves on its own.
+To check:
 
 ```bash
 just check-updates    # exits non-zero when a pin is stale
 ```
 
-It compares both pins with the registry and prints the
+It compares all three pins with their registries and prints the
 `skopeo inspect docker://<image> | jq -r .Digest` line to copy. Renovate (see
 `.github/renovate.json5`) opens the base-image bump as a pull request when the
 app is installed on the repository; Dependabot keeps the GitHub Actions versions

@@ -1,4 +1,5 @@
 cosign.key
 _build_*
+_chunkah_*
 output
 _build-*/**

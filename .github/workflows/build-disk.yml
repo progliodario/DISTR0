@@ -28,7 +28,10 @@ env:
   IMAGE_NAME: ${{ github.event.repository.name }} # output of build.yml, keep in sync
   IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"  # do not edit
   DEFAULT_TAG: "latest"
-  BIB_IMAGE: "quay.io/centos-bootc/bootc-image-builder:latest"
+  # Pinned by digest (multi-arch index, amd64 and arm64 both resolve) so a disk
+  # image is built from byte-identical inputs; bump it on purpose with
+  #   skopeo inspect docker://quay.io/centos-bootc/bootc-image-builder:latest | jq -r .Digest
+  BIB_IMAGE: "quay.io/centos-bootc/bootc-image-builder@sha256:dab86ee6b46dcade411b37f4e70b07d93b6a06da0dbfec6fe89247a220e0d9f8"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
@@ -82,7 +85,9 @@ jobs:
 
       - name: Build disk images
         id: build
-        uses: osbuild/bootc-image-builder-action@main
+        # Pinned to a commit, not to the moving `main` branch; bump it with
+        #   git ls-remote https://github.com/osbuild/bootc-image-builder-action refs/heads/main
+        uses: osbuild/bootc-image-builder-action@028e4d28330efe546229eb9cb52aee78174d2347
         with:
           builder-image: ${{ env.BIB_IMAGE }}
           config-file: ${{ matrix.disk-type == 'anaconda-iso' && './disk_config/iso.toml' || './disk_config/disk.toml' }}
