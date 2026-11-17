@@ -69,16 +69,21 @@ jobs:
       - name: Allow rootless containers
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
+      # Best effort: it warms the storage with the retries buildah lacks, but the
+      # build pulls the base itself if this does not work, so a registry hiccup
+      # here must not decide the build.
       - name: Pull the pinned base image
+        continue-on-error: true
         run: |
           set -xeuo pipefail
           df -h /
-          base="$(grep -oE 'ghcr\.io/ublue-os/bluefin:[^@]+@sha256:[0-9a-f]{64}' Containerfile | head -n1)"
+          base="$(awk '/^FROM ghcr\.io\/ublue-os\/bluefin/{print $2}' Containerfile | head -n1)"
+          ref="ghcr.io/ublue-os/bluefin@${base#*@}"
+          echo "base=${base}"
+          echo "ref=${ref}"
 
-          # Five tries, done here rather than in buildah: the client's own error is
-          # the one worth keeping, and something has to retry.
           for attempt in 1 2 3 4 5; do
-            if output="$(podman pull "docker://${base}" 2>&1)"; then
+            if output="$(podman pull "${ref}" 2>&1)"; then
               echo "${output}"
               exit 0
             fi
@@ -87,9 +92,7 @@ jobs:
             sleep 10
           done
 
-          # The failure goes into an annotation: the job log needs permissions
-          # this repository's own automation does not have.
-          echo "::error title=Base image pull::$(printf '%s' "${output}" | tail -n 4 | tr '\n' ' ' | cut -c1-900) | $(df -h / | tail -1)"
+          echo "::error title=Base image pull::${ref} | $(printf '%s' "${output}" | tail -n 4 | tr '\n' ' ' | cut -c1-800)"
           exit 1
 
       - name: Get current date
