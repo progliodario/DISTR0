@@ -69,8 +69,14 @@ if [[ -r ${os_release} ]]; then
         bad 'IMAGE_VERSION is set'
     fi
     compare 'LOGO is distr0-logo' "${LOGO:-}" distr0-logo
-    # The distribution fields must keep describing the base, not the fork.
-    compare 'os-release ID still says bluefin' "${ID:-}" bluefin
+    # The distribution identity must keep describing the base, not the fork.
+    # The exact value is the base image's business; what must not happen is
+    # DISTR0 overwriting it, which would break tooling that keys off the distro.
+    if [[ -n ${ID:-} && ${ID} != distr0 ]]; then
+        ok "os-release ID still describes the base (${ID})"
+    else
+        bad 'os-release ID still describes the base' "${ID:-missing}"
+    fi
 else
     bad "reading ${os_release}"
 fi

@@ -131,7 +131,21 @@ jobs:
       - name: Run the image self-test
         run: |
           set -xeuo pipefail
-          podman run --rm "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" /usr/share/distr0/selftest.sh
+          report="${RUNNER_TEMP}/selftest.log"
+          if podman run --rm "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" \
+               /usr/share/distr0/selftest.sh > "${report}" 2>&1; then
+            cat "${report}"
+            exit 0
+          fi
+          cat "${report}"
+          # One annotation per failed check: the job log needs permissions the
+          # repository's own automation may not have, annotations do not.
+          while IFS= read -r line; do
+            case "${line}" in
+              FAIL*) echo "::error title=DISTR0 self-test::${line}" ;;
+            esac
+          done < "${report}"
+          exit 1
 
       # Advisory on purpose: `--fatal-warnings` can fail on warnings that come
       # from the base image, which this project does not control. Read the log,
