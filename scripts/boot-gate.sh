@@ -213,6 +213,11 @@ build_qcow2() {
         selinux=(--security-opt label=type:unconfined_t)
     fi
 
+    # podman does not create a missing bind-mount source for a rootful
+    # container, and bootc-image-builder reports the missing /output as a
+    # statfs error that says nothing about the real cause.
+    mkdir -p "${WORKDIR}/output"
+
     say "Building the qcow2 with bootc-image-builder (this takes a few minutes)"
     if ! "${SUDO[@]}" podman run --rm --privileged --pull=missing --net=host \
         "${selinux[@]}" \
