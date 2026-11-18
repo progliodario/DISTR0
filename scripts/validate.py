@@ -310,6 +310,13 @@ def check_delivery() -> None:
 
     verify = read(".github/workflows/verify-image.yml")
     check("CI verifies the SBOM attestation", "cosign verify-attestation" in verify)
+    # Signing without a transparency log only works if verification skips it too.
+    check("CI signs without uploading to a transparency log", "--tlog-upload=false" in build)
+    check(
+        "CI verifies attestations without a transparency log",
+        "--insecure-ignore-tlog" in verify,
+        "signatures have no Rekor entry, so verify must not require one",
+    )
     check(
         "the attestation check pins cosign",
         re.search(r"cosign-installer@[0-9a-f]{40}", verify) is not None,

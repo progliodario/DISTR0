@@ -102,8 +102,10 @@ jobs:
         run: |
           set -xeuo pipefail
           digest="$(skopeo inspect --format '{{.Digest}}' "docker://${IMAGE}")"
-          cosign verify-attestation --key ./cosign.pub --type spdxjson \
-            "${IMAGE%:*}@${digest}" > "${RUNNER_TEMP}/attestations.json"
+          # No transparency-log entry by design (see build.yml): this project's
+          # trust anchor is the key, which is what every device ships.
+          cosign verify-attestation --key ./cosign.pub --insecure-ignore-tlog \
+            --type spdxjson "${IMAGE%:*}@${digest}" > "${RUNNER_TEMP}/attestations.json"
           jq -r '.payload' "${RUNNER_TEMP}/attestations.json" | base64 -d > "${RUNNER_TEMP}/attestation.json"
           jq -e '.predicateType == "https://spdx.dev/Document"' "${RUNNER_TEMP}/attestation.json"
           jq -r '.predicate.packages | length' "${RUNNER_TEMP}/attestation.json" \

@@ -81,11 +81,17 @@ key, so the inventory is as checkable as the image:
 ```bash
 cosign verify-attestation \
   --key https://raw.githubusercontent.com/progliodario/DISTR0/main/cosign.pub \
+  --insecure-ignore-tlog \
   --type spdxjson ghcr.io/progliodario/distr0:latest \
   | jq -r '.payload' | base64 -d | jq '.predicate.packages | length'
 ```
 
-`verify-image.yml` runs that check weekly against the published image.
+The attestation lists packages, not a hash of every file: that is what answers
+"is this package in the image?" and what keeps it small enough to attach.
+Signatures and attestations are key-based and deliberately not uploaded to a
+public transparency log — the trust anchor is the key each machine already
+verifies against, so a Rekor outage cannot block a release.
+`verify-image.yml` runs this check weekly against the published image.
 
 ### What every build runs
 

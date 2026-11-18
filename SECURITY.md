@@ -34,7 +34,10 @@ repository's CI, and a wrong or tampered image will not land. It is not an audit
 of the content — that is what the package sources, the pinned base digest and
 review of `main` are for.
 
-The SBOM attestation is signed with the same key and proves something narrower:
+The SBOM attestation is signed with the same key, carries the package inventory
+(not a file-level hash of the OS), and is likewise not published to a public
+transparency log: verification is the key, so no external service sits between a
+release and a machine's decision to trust it. It proves something narrower:
 this inventory was produced for this image by this repository's CI. It is useful
 for answering "is this package in the image?" and for tracking a CVE, and it is
 not a statement that the packages are free of vulnerabilities.
