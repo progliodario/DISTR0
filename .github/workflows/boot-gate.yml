@@ -102,6 +102,7 @@ jobs:
             ${{ runner.temp }}/boot-gate/boot-gate.log
             ${{ runner.temp }}/boot-gate/bib.log
             ${{ runner.temp }}/boot-gate/bib-pull.log
+            ${{ runner.temp }}/boot-gate/qemu.log
             ${{ runner.temp }}/boot-gate/console.log
             ${{ runner.temp }}/boot-gate/qmp.log
           if-no-files-found: warn

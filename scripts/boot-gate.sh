@@ -35,6 +35,7 @@ QCOW2=""
 WORKDIR=""
 EXPECT_REVISION=""
 SSH_PORT=""
+QEMU_PID=""
 SSH_OPTS=(
     -o BatchMode=yes
     -o StrictHostKeyChecking=no
@@ -125,23 +126,18 @@ say "Workdir: ${WORKDIR}"
 say ""
 
 stop_vm() {
-    local pid
-    if [[ -f ${WORKDIR}/qemu.pid ]]; then
-        pid="$(cat "${WORKDIR}/qemu.pid" 2> /dev/null || true)"
-        if [[ -n ${pid} ]] && kill -0 "${pid}" 2> /dev/null; then
-            kill "${pid}" 2> /dev/null || true
-            for _ in $(seq 1 10); do
-                kill -0 "${pid}" 2> /dev/null || break
-                sleep 1
-            done
-            kill -9 "${pid}" 2> /dev/null || true
-        fi
-        rm -f "${WORKDIR}/qemu.pid"
+    if [[ -n ${QEMU_PID} ]] && kill -0 "${QEMU_PID}" 2> /dev/null; then
+        kill "${QEMU_PID}" 2> /dev/null || true
+        for _ in $(seq 1 10); do
+            kill -0 "${QEMU_PID}" 2> /dev/null || break
+            sleep 1
+        done
+        kill -9 "${QEMU_PID}" 2> /dev/null || true
     fi
 }
 
 qemu_running() {
-    [[ -f ${WORKDIR}/qemu.pid ]] && kill -0 "$(cat "${WORKDIR}/qemu.pid")" 2> /dev/null
+    [[ -n ${QEMU_PID} ]] && kill -0 "${QEMU_PID}" 2> /dev/null
 }
 
 trap stop_vm EXIT
@@ -274,6 +270,10 @@ PY
 
     # -vga std is the one display device QEMU can always screenshot through QMP;
     # GNOME falls back to llvmpipe, which is all a login screen needs.
+    #
+    # Kept in the foreground of a background job rather than -daemonize: when it
+    # dies, wait gives the exit status (137 is the OOM killer) and qemu.log has
+    # the reason, which is what the gate has to report.
     qemu-system-x86_64 \
         -machine "q35,accel=${accel}" \
         -cpu "${cpu}" \
@@ -285,9 +285,9 @@ PY
         -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:${port}-:22" \
         -qmp "unix:${WORKDIR}/qmp.sock,server=on,wait=off" \
         -serial "file:${WORKDIR}/console.log" \
-        -daemonize \
-        -pidfile "${WORKDIR}/qemu.pid"
+        > "${WORKDIR}/qemu.log" 2>&1 &
 
+    QEMU_PID=$!
     SSH_PORT=${port}
     say "Booting ${QCOW2} (${accel}) with SSH on 127.0.0.1:${port}"
 }
@@ -298,8 +298,18 @@ ssh_do() {
 }
 
 guest_down() {
-    say "The guest console ends with:"
-    tail -n 40 "${WORKDIR}/console.log" 2> /dev/null | while IFS= read -r line; do
+    local status=unknown line
+    if [[ -n ${QEMU_PID} ]]; then
+        set +e
+        wait "${QEMU_PID}" 2> /dev/null
+        status=$?
+        set -e
+    fi
+    printf 'FAIL  QEMU exit status: %s\n' "${status}"
+    tail -n 3 "${WORKDIR}/qemu.log" 2> /dev/null | while IFS= read -r line; do
+        [[ -n ${line} ]] && printf 'FAIL  qemu: %s\n' "${line}"
+    done
+    tail -n 3 "${WORKDIR}/console.log" 2> /dev/null | while IFS= read -r line; do
         [[ -n ${line} ]] && printf 'FAIL  guest console: %s\n' "${line}"
     done
     return 0
