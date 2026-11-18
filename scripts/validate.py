@@ -478,6 +478,33 @@ def check_delivery() -> None:
     check(".gitignore ignores generated SBOMs", "sbom.spdx.json" in read(".gitignore"))
 
 
+def check_cosign_commands() -> None:
+    """Signing skips Rekor, so every documented verification must skip it too.
+
+    A command in the docs that omits `--insecure-ignore-tlog` fails with "signature
+    not found in transparency log" against a real published image, so this is a
+    promise users act on, not prose.
+    """
+    for rel in (
+        "README.md",
+        "AGENTS.md",
+        "SECURITY.md",
+        "system_files/usr/share/doc/distr0/README.md",
+    ):
+        if not (ROOT / rel).exists():
+            continue
+        lines = read(rel).splitlines()
+        for index, line in enumerate(lines):
+            if "cosign verify" not in line:
+                continue
+            block = " ".join(lines[index : index + 5])
+            check(
+                f"{rel}:{index + 1} does not require a transparency log",
+                "--insecure-ignore-tlog" in block,
+                "images are signed with --tlog-upload=false, so this command fails as written",
+            )
+
+
 def check_docs() -> None:
     agents = ROOT / "AGENTS.md"
     check("AGENTS.md exists", agents.exists())
@@ -713,6 +740,7 @@ def main() -> int:
     check_image_promises()
     check_identity()
     check_delivery()
+    check_cosign_commands()
     check_docs()
     check_doc_paths()
 

@@ -71,10 +71,14 @@ purpose.
 ## Verify the image
 
 Images are signed with [cosign](https://docs.sigstore.dev/) using the key in
-[`cosign.pub`](cosign.pub):
+[`cosign.pub`](cosign.pub). The signatures are deliberately not uploaded to a
+public transparency log, so verification asks for that explicitly:
+`--insecure-ignore-tlog` skips the *log entry*, never the signature check — the
+key is what is trusted, and a signature made by another key still fails.
 
 ```bash
 cosign verify \
+  --insecure-ignore-tlog \
   --key https://raw.githubusercontent.com/progliodario/DISTR0/main/cosign.pub \
   ghcr.io/progliodario/distr0:latest
 ```
