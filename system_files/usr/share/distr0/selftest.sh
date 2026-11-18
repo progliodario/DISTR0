@@ -107,6 +107,61 @@ expect 'locale is it_IT.UTF-8' grep -q '^LANG=it_IT.UTF-8' /etc/locale.conf
 expect 'console keymap is it2' grep -q '^KEYMAP=it2' /etc/vconsole.conf
 expect 'dconf branding ships as 99-' test -f /etc/dconf/db/distro.d/99-distr0-branding
 
+# --- Desktop identity -------------------------------------------------------
+# A file that exists but is never read looks exactly like a file that does not
+# exist, so each piece is checked where it takes effect: the compiled schema
+# database, the dconf drop-in GDM reads, and the art the desktop points at.
+banner=/usr/share/distr0/banner.sh
+banner_hook=/etc/profile.d/zz-distr0-banner.sh
+fastfetch_preset=/usr/share/fastfetch/presets/distr0.jsonc
+ascii_logo=/usr/share/distr0/ascii-logo.txt
+schema_override=/usr/share/glib-2.0/schemas/zz0-distr0.gschema.override
+gdm_logo=/usr/share/pixmaps/distr0-gdm-logo.png
+gdm_dconf=/etc/dconf/db/gdm.d/01-distr0-gdm
+light_wallpaper=/usr/share/backgrounds/distr0/distr0-wallpaper-light.png
+branding=/etc/dconf/db/distro.d/99-distr0-branding
+
+expect 'the login banner hook is shipped' test -s "${banner_hook}"
+expect 'the banner hook only greets interactive shells' grep -qF -- '$- == *i*' "${banner_hook}"
+expect 'the banner text is shipped' test -s "${banner}"
+expect 'the banner is executable' test -x "${banner}"
+expect 'the banner is valid bash' bash -n "${banner}"
+expect 'the ASCII mark is shipped' test -s "${ascii_logo}"
+expect 'the fastfetch preset is valid JSON' jq -e . "${fastfetch_preset}"
+expect 'the fastfetch preset uses the shipped mark' grep -qF "${ascii_logo}" "${fastfetch_preset}"
+expect 'the schema override is shipped' test -s "${schema_override}"
+
+if banner_output="$(bash "${banner}" 2>&1)" && [[ ${banner_output} == *distr0-update* ]]; then
+    ok 'the banner prints the update command'
+else
+    bad 'the banner prints the update command' "${banner_output:-no output}"
+fi
+
+# The override only counts once the schema database is compiled, so the value is
+# read back through gsettings -- the same lookup the desktop performs.
+button_layout="$(GSETTINGS_BACKEND=memory gsettings get org.gnome.desktop.wm.preferences button-layout 2> /dev/null || true)"
+compare 'the window buttons come from the schema override' "${button_layout}" "':minimize,maximize,close'"
+accent="$(GSETTINGS_BACKEND=memory gsettings get org.gnome.desktop.interface accent-color 2> /dev/null || true)"
+compare 'the accent colour comes from the schema override' "${accent}" "'blue'"
+expect 'the schema overrides compile' glib-compile-schemas --dry-run /usr/share/glib-2.0/schemas
+
+expect 'the login screen wordmark is shipped' test -s "${gdm_logo}"
+expect 'GDM points at the wordmark' grep -qF "logo='${gdm_logo}'" "${gdm_dconf}"
+if grep -q 'system-db:gdm' /etc/dconf/profile/gdm 2> /dev/null; then
+    ok 'the GDM dconf profile includes system-db:gdm'
+else
+    printf 'note  /etc/dconf/profile/gdm does not mention system-db:gdm: the wordmark may not be read\n'
+fi
+
+light_size="$(stat -c %s "${light_wallpaper}" 2> /dev/null || echo 0)"
+if [[ ${light_size} -gt 10000 ]]; then
+    ok "the light-mode wallpaper is a PNG of ${light_size} bytes"
+else
+    bad 'the light-mode wallpaper is a PNG of reasonable size' "${light_size} bytes"
+fi
+expect 'light mode uses the light wallpaper' grep -qF "picture-uri='file://${light_wallpaper}'" "${branding}"
+expect 'dark mode uses the dark wallpaper' grep -qF "picture-uri-dark='file://${wallpaper}'" "${branding}"
+
 # --- Update verification ----------------------------------------------------
 if [[ -r ${key} ]]; then
     key_header="$(head -c 26 "${key}" 2> /dev/null || true)"
@@ -142,7 +197,7 @@ expect 'registries.d enables sigstore attachments' grep -q 'use-sigstore-attachm
 expect 'the Flatpak list declares at least one app' grep -q '^\[Flatpak Preinstall ' "${preinstall}"
 expect 'the Flatpak list declares Firefox' grep -q 'org.mozilla.firefox' "${preinstall}"
 expect 'the Homebrew list declares formulae' grep -q '^brew "' "${brewfile}"
-for recipe in distr0-info distr0-update distr0-apps distr0-cli distr0-verify distr0-doctor; do
+for recipe in distr0-info distr0-greeting distr0-update distr0-apps distr0-cli distr0-verify distr0-doctor distr0-rollback; do
     expect "ujust ${recipe} exists" grep -q "^${recipe}" "${recipes}"
 done
 

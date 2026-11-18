@@ -34,7 +34,14 @@ dnf5 install -y --setopt=install_weak_deps=False \
 # dnf5 -y copr disable <user>/<copr>
 
 # ---------------------------------------------------------------------------
-# 3. Branding: rebrand os-release
+# 3. Branding: desktop defaults, then os-release
+# A gschema override is part of the schema database, not of dconf: it only
+# applies once /usr/share/glib-2.0/schemas/gschemas.compiled is rebuilt, which is
+# a build-time job (the dconf drop-ins under /etc/dconf/db/distro.d are compiled
+# at boot by dconf-update.service, so those need nothing here).
+# ---------------------------------------------------------------------------
+glib-compile-schemas /usr/share/glib-2.0/schemas
+
 # os-release has no drop-in directory, and shipping a static copy from git
 # would freeze VERSION_ID. Rewrite the base file in place instead, keeping every
 # field the base image set and overriding only the identity strings.
@@ -146,6 +153,16 @@ fi
 # ---------------------------------------------------------------------------
 test -f /usr/share/doc/distr0/README.md
 test -f /usr/share/backgrounds/distr0/distr0-wallpaper.png
+test -f /usr/share/backgrounds/distr0/distr0-wallpaper-light.png
+test -f /usr/share/pixmaps/distr0-gdm-logo.png
+test -f /etc/dconf/db/gdm.d/01-distr0-gdm
+test -f /usr/share/distr0/banner.sh
+test -f /etc/profile.d/zz-distr0-banner.sh
+test -f /usr/share/distr0/ascii-logo.txt
+test -f /usr/share/fastfetch/presets/distr0.jsonc
+jq -e . /usr/share/fastfetch/presets/distr0.jsonc > /dev/null
+test -f /usr/share/glib-2.0/schemas/zz0-distr0.gschema.override
+grep -q 'accent-color' /usr/share/glib-2.0/schemas/zz0-distr0.gschema.override
 test -f /usr/share/flatpak/preinstall.d/distr0.preinstall
 test -f /usr/share/ublue-os/homebrew/preinstall.d/distr0-cli.Brewfile
 test -f /usr/share/ublue-os/just/60-custom.just

@@ -1,0 +1,22 @@
+# DISTR0 desktop defaults, compiled into gschemas.compiled by build.sh.
+#
+# These are defaults, not locks: a user's own dconf value always wins. The file
+# name starts with zz0 so it sorts after every schema package's own override.
+# Only long-stable keys belong here -- a key that disappears upstream makes the
+# compiled database wrong for everyone, so anything new goes in
+# /etc/dconf/db/distro.d/ instead, where Bluefin already merges drop-ins.
+
+[org.gnome.desktop.interface]
+accent-color='blue'
+color-scheme='prefer-dark'
+
+[org.gnome.desktop.wm.preferences]
+button-layout=':minimize,maximize,close'
+
+[org.gnome.desktop.peripherals.touchpad]
+tap-to-click=true
+natural-scroll=true
+disable-while-typing=true
+
+[org.gnome.mutter]
+experimental-features=['variable-refresh-rate', 'scale-monitor-framebuffer']

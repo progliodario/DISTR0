@@ -112,12 +112,13 @@ jobs:
         with:
           # This generates all the tags for your image, you can add custom tags here too!
           # Default tags are "$DEFAULT_TAG" and "$DEFAULT_TAG.$date".
+          # Only the tags that are actually published. A pull request builds and
+          # tests the image but never pushes it (see the `if` on the push step),
+          # so a `sha-…` or `pr-…` tag would name something that does not exist.
           tags: |
             type=raw,value=${{ env.DEFAULT_TAG }}
             type=raw,value=${{ env.DEFAULT_TAG }}.{{date 'YYYYMMDD'}}
             type=raw,value={{date 'YYYYMMDD'}}
-            type=sha,enable=${{ github.event_name == 'pull_request' }}
-            type=ref,event=pr
           labels: |
             io.artifacthub.package.readme-url=https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}/${{ github.sha }}/README.md
             org.opencontainers.image.created=${{ steps.date.outputs.date }}
@@ -197,9 +198,33 @@ jobs:
         continue-on-error: true
         run: |
           set -xeuo pipefail
-          podman run --rm --security-opt label=disable \
-            "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" \
-            bootc container lint --fatal-warnings
+          report="${RUNNER_TEMP}/bootc-lint.log"
+          if podman run --rm --security-opt label=disable \
+               "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" \
+               bootc container lint --fatal-warnings > "${report}" 2>&1; then
+            cat "${report}"
+            exit 0
+          fi
+          cat "${report}"
+          # This step is advisory because the warnings can come from the base
+          # image, which this project does not control. Annotations put them on
+          # the run summary, where they are seen, instead of in a log that the
+          # repository's own automation may not be allowed to read.
+          annotated=0
+          while IFS= read -r line; do
+            case "${line}" in
+              warning:*|error:*)
+                if [[ ${annotated} -lt 20 ]]; then
+                  echo "::warning title=bootc container lint::${line}"
+                  annotated=$((annotated + 1))
+                fi
+                ;;
+            esac
+          done < "${report}"
+          if [[ ${annotated} -eq 0 ]]; then
+            echo '::warning title=bootc container lint::lint failed without a warning: line, see the log above'
+          fi
+          exit 1
 
       # Rechunk: rebuild the image with many small layers instead of one big
       # build layer, so that `bootc upgrade` only downloads what actually

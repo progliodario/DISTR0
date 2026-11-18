@@ -16,6 +16,7 @@ sudo systemctl reboot
 | [AGENTS.md](AGENTS.md) | Invariants, file map, recipes for common changes and the failure playbook. Read this before changing anything, whether you are a new maintainer or an AI agent (`CLAUDE.md` is a symlink to it). |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, the verification loop, pull request checklist |
 | [SECURITY.md](SECURITY.md) | Reporting a vulnerability, the trust model, signing-key rotation |
+| [ASSETS.md](ASSETS.md) | Where every shipped image comes from, and how to regenerate it |
 
 ## What DISTR0 changes compared to its base
 
@@ -25,7 +26,9 @@ tooling. Its own delta:
 
 | Change | Where |
 | --- | --- |
-| Identity: `os-release` rebrand, wallpaper, `distr0-logo` | `build_files/build.sh`, `system_files/usr/share/{backgrounds,icons}` |
+| Identity: `os-release` rebrand, a wallpaper per colour scheme, `distr0-logo`, login-screen wordmark | `build_files/build.sh`, `system_files/usr/share/{backgrounds,icons,pixmaps}` |
+| Quiet login banner and `ujust distr0-greeting` (fastfetch) | `system_files/{etc/profile.d,usr/share/distr0,usr/share/fastfetch}` |
+| Desktop defaults compiled into the schema database: accent, buttons, touchpad, VRR | `system_files/usr/share/glib-2.0/schemas/zz0-distr0.gschema.override`, `build_files/build.sh` |
 | Italian defaults: locale `it_IT.UTF-8`, timezone `Europe/Rome`, console keymap `it2`, GNOME keyboard layout `it` | `system_files/etc/{locale.conf,vconsole.conf,localtime}`, `system_files/etc/dconf/db/distro.d/99-distr0-branding` |
 | GUI apps declared for first boot: Firefox, Thunderbird, LibreOffice, VLC | `system_files/usr/share/flatpak/preinstall.d/distr0.preinstall` |
 | CLI tools installed through Homebrew: `bottom`, `dust`, `lazygit`, `xh` | `system_files/usr/share/ublue-os/homebrew/preinstall.d/distr0-cli.Brewfile` |
@@ -45,10 +48,12 @@ apps, Homebrew for CLI tools, distrobox/toolbox for workloads).
 | `ghcr.io/progliodario/distr0:latest` | `ghcr.io/ublue-os/bluefin:latest` (pinned by digest, Fedora 45) |
 
 Every build on `main` publishes `latest`, `latest.<YYYYMMDD>` and `<YYYYMMDD>`.
-Pull requests only publish `sha-<short>` and `pr-<n>` tags and never move
-`latest`. The scheduled rebuild runs weekly: because the base image is pinned by
-digest, a rebuild republishes the same content — bumping the pin is what brings
-new upstream packages in (see
+Pull requests build the image and run the self-test, but publish nothing: a fork
+cannot write to this repository's packages, and a commit nobody has reviewed
+must not become a tag someone installs. The push, sign and attest steps are all
+gated on the default branch. The scheduled rebuild runs weekly: because the base
+image is pinned by digest, a rebuild republishes the same content — bumping the
+pin is what brings new upstream packages in (see
 [Keeping the pins current](#keeping-the-pins-current)).
 
 Images are rechunked with [chunkah](https://github.com/coreos/chunkah), pinned by
@@ -97,12 +102,14 @@ verifies against, so a Rekor outage cannot block a release.
 
 - `just test` — `/usr/share/distr0/selftest.sh` inside the built image: the
   identity fields, the shipped files, the signature policy and key, the declared
-  Flatpaks and formulae, the units this repository enables itself, and that a
-  kernel is installed. It runs on pull requests too, before the image is
-  rechunked.
+  Flatpaks and formulae, the desktop defaults read back through `gsettings`, the
+  banner and the art the desktop points at, the units this repository enables
+  itself, and that a kernel is installed. It runs on pull requests too, before
+  the image is rechunked.
 - `bootc container lint --fatal-warnings` — advisory for now: a warning that
-  comes from the base image must not stop the pipeline, so the step reports and
-  the log gets read (see `AGENTS.md`).
+  comes from the base image must not stop the pipeline. Each warning becomes a
+  run annotation, so it is visible on the summary even when the job log is not
+  readable (see `AGENTS.md`).
 - `scripts/layer-diff.py` — compares the manifest of the published image with
   the new one and writes what an update will download into the run summary. The
   numbers above were measured this way.
@@ -158,10 +165,43 @@ ujust distr0-lang en_US.UTF-8         # or any locale the image carries
 localectl set-keymap it2              # console keymap
 ```
 
-The GNOME keyboard layout (`it`) and the wallpaper come from
+The GNOME keyboard layout (`it`) and the wallpapers come from
 `/etc/dconf/db/distro.d/99-distr0-branding`, compiled by Bluefin's
 `dconf-update.service`. `ujust distr0-reset-desktop` re-applies them after you
 change something by hand.
+
+## Desktop defaults and the login banner
+
+Two separate mechanisms, on purpose:
+
+- **Schema defaults** are compiled into the schema database by `build.sh` from
+  `system_files/usr/share/glib-2.0/schemas/zz0-distr0.gschema.override`: blue
+  accent colour, dark preference, minimise/maximise/close buttons on the right,
+  tap-to-click, natural scrolling, disable-while-typing and variable refresh
+  rate. They are defaults, not locks — anything set in Settings wins, and
+  `ujust distr0-reset-desktop` cannot undo them because no dconf key is involved.
+- **dconf defaults** stay in `/etc/dconf/db/distro.d/99-distr0-branding`
+  (wallpapers, keyboard layout, screensaver) because Bluefin already compiles
+  that directory at boot.
+
+The login screen has its own database: `/etc/dconf/db/gdm.d/01-distr0-gdm`
+points `org.gnome.login-screen logo` at
+`/usr/share/pixmaps/distr0-gdm-logo.png`.
+
+In a terminal, `/etc/profile.d/zz-distr0-banner.sh` prints three lines — image
+version, base and kernel, the two commands worth knowing. It runs in interactive
+shells only, once per session, and reads its text from
+`/usr/share/distr0/banner.sh`, which is also what `ujust distr0-greeting` runs:
+
+```bash
+DISTR0_NO_BANNER=1          # in ~/.profile or /etc/environment, turns it off
+ujust distr0-greeting       # the greeting plus fastfetch, on demand
+```
+
+`ujust distr0-greeting` is the full picture: a fastfetch preset at
+`/usr/share/fastfetch/presets/distr0.jsonc` with the DISTR0 mark in ASCII. The
+wallpapers follow the colour scheme: light mode gets
+`distr0-wallpaper-light.png`, dark mode the original.
 
 ## Applications
 
@@ -194,13 +234,14 @@ verifies the recipe syntax on its own.
 just build                                            # -> localhost/distr0:latest
 just test                                             # run the image self-test in a container
 just test-unit                                        # unit tests for the repository's own checks
+just assets                                           # regenerate the shipped PNGs (needs Pillow)
 sudo bootc switch --transport containers-storage localhost/distr0:latest
 ```
 
 The image carries its own test — `/usr/share/distr0/selftest.sh` — which asserts
-the identity fields, the overlay files, the signature policy and key, the declared
-Flatpaks and formulae, the enabled units and that exactly one kernel is
-installed. `just test` runs it against the image; `ujust distr0-doctor` runs it
+the identity fields, the overlay files, the signature policy and key, the
+declared Flatpaks and formulae, the desktop defaults as the desktop itself reads
+them back, the enabled units and that a kernel is installed. `just test` runs it against the image; `ujust distr0-doctor` runs it
 on a device together with the deployment state, failed units and disk usage.
 
 Disk images (via [bootc-image-builder](https://osbuild.org/docs/bootc/)):
@@ -238,6 +279,8 @@ instead of ten minutes into an image build.
 | `scripts/validate.py` | Cross-file consistency checks, run by `just lint` and CI |
 | `.github/workflows/` | CI: image build/push/sign, disk images, fast validation, weekly policy enforcement test |
 | `cosign.pub` | Public key used to verify published images |
+| `ASSETS.md` | Provenance and regeneration of every shipped image asset |
+| `scripts/render-assets.py` | Renders the wallpapers and the GDM wordmark (`just assets`) |
 
 ## Customizing
 
@@ -255,9 +298,11 @@ instead of ten minutes into an image build.
    whether the pin (or the chunkah one) has moved. `bluefin:latest` tracks the current
    Fedora release (45 today); `bluefin:stable` is the GTS stream and is still on
    Fedora 44, which would be a major-version downgrade for this image.
-4. **Branding** — the wallpaper and logo live under
-   `system_files/usr/share/{backgrounds,icons}`; the `os-release` strings are set
-   in `build_files/build.sh` so `VERSION_ID` keeps tracking the base image.
+4. **Branding** — the wallpapers, the logo and the GDM wordmark live under
+   `system_files/usr/share/{backgrounds,icons,pixmaps}`, and [`ASSETS.md`](ASSETS.md)
+   says where each comes from and how to regenerate it. The `os-release` strings
+   are set in `build_files/build.sh` so `VERSION_ID` keeps tracking the base
+   image; the desktop defaults are the gschema override.
 
 ## Keeping the pins current
 

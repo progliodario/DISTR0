@@ -8,6 +8,8 @@ Run with `just test-unit` (or `pytest -q tests`).
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -67,6 +69,47 @@ def test_recipe_names_reads_the_justfiles() -> None:
     assert {"build", "lint", "check-updates", "test", "test-unit"} <= justfile
     custom = validate.recipe_names("system_files/usr/share/ublue-os/just/60-custom.just")
     assert {"distr0-info", "distr0-verify", "distr0-doctor", "distr0-rollback"} <= custom
+
+
+def test_every_shipped_asset_is_documented() -> None:
+    """Provenance is part of shipping art: an undocumented file is unlicensed."""
+    assets = (ROOT / "ASSETS.md").read_text(encoding="utf-8")
+    shipped = [
+        str(path.relative_to(ROOT))
+        for root in validate.ASSET_ROOTS
+        for path in (ROOT / root).rglob("*")
+        if path.is_file()
+    ]
+    assert shipped
+    assert [path for path in shipped if path not in assets] == []
+
+
+def test_fastfetch_preset_is_json_and_points_at_the_mark() -> None:
+    preset = json.loads(
+        (ROOT / "system_files/usr/share/fastfetch/presets/distr0.jsonc").read_text(
+            encoding="utf-8"
+        )
+    )
+    source = preset["logo"]["source"]
+    assert source == "/usr/share/distr0/ascii-logo.txt"
+    assert (ROOT / "system_files" / source.lstrip("/")).is_file()
+    assert preset["modules"][:3] == ["title", "os", "kernel"]
+
+
+def test_banner_is_valid_bash_and_stays_quiet() -> None:
+    banner = ROOT / "system_files/usr/share/distr0/banner.sh"
+    assert subprocess.run(["bash", "-n", str(banner)], check=False).returncode == 0
+    hook = (ROOT / "system_files/etc/profile.d/zz-distr0-banner.sh").read_text(encoding="utf-8")
+    # Both guards are what keep the greeting out of scripts and second terminals.
+    assert "$- == *i*" in hook
+    assert "DISTR0_BANNER_SHOWN" in hook
+
+
+def test_png_size_rejects_non_png(tmp_path: Path) -> None:
+    fake = tmp_path / "fake.png"
+    fake.write_bytes(b"not a png at all, but long enough")
+    assert validate.png_size(fake) is None
+    assert validate.png_size(tmp_path / "missing.png") is None
 
 
 def test_self_test_ships_with_the_image() -> None:

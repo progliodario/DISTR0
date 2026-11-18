@@ -10,7 +10,9 @@ Only the repository is read; nothing is modified and no network is used.
 
 from __future__ import annotations
 
+import json
 import re
+import struct
 import subprocess
 import sys
 import tomllib
@@ -224,6 +226,7 @@ def check_recipes() -> None:
     custom = read("system_files/usr/share/ublue-os/just/60-custom.just")
     for recipe in (
         "distr0-info",
+        "distr0-greeting",
         "distr0-update",
         "distr0-apps",
         "distr0-cli",
@@ -238,7 +241,7 @@ def check_recipes() -> None:
             re.search(rf"^{recipe}\b", custom, re.MULTILINE) is not None,
         )
     justfile = read("Justfile")
-    for recipe in ("build", "rechunk", "lint", "check-updates", "test", "test-unit"):
+    for recipe in ("build", "rechunk", "lint", "assets", "check-updates", "test", "test-unit"):
         check(
             f"Justfile defines {recipe}",
             re.search(rf"^{recipe}\b", justfile, re.MULTILINE) is not None,
@@ -286,7 +289,7 @@ def check_image_promises() -> None:
             bool(selftest.stat().st_mode & 0o111),
             "chmod +x system_files/usr/share/distr0/selftest.sh",
         )
-        for claim in ("IMAGE_ID", "sigstoreSigned", "distr0-doctor"):
+        for claim in ("IMAGE_ID", "sigstoreSigned", "distr0-doctor", "distr0-greeting", "accent-color"):
             check(f"the self-test asserts {claim}", claim in text)
     check(
         "`just test` runs the self-test",
@@ -294,6 +297,118 @@ def check_image_promises() -> None:
         "the recipe exists but no longer runs the shipped test",
     )
     check("tests/test_validate.py exists", (ROOT / "tests/test_validate.py").is_file())
+
+
+ASSET_ROOTS = (
+    "system_files/usr/share/backgrounds",
+    "system_files/usr/share/icons",
+    "system_files/usr/share/pixmaps",
+)
+
+
+def image_path(path: str) -> Path:
+    """An absolute path inside the image -> the file under system_files/."""
+    return ROOT / "system_files" / path.lstrip("/")
+
+
+def png_size(path: Path) -> tuple[int, int] | None:
+    """Width and height from a PNG header, or None when it is not a PNG."""
+    try:
+        data = path.read_bytes()[:24]
+    except OSError:
+        return None
+    if len(data) < 24 or not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    return struct.unpack(">II", data[16:24])
+
+
+def check_identity() -> None:
+    """The desktop identity: banner, fastfetch, schema defaults, GDM, art."""
+    banner = "system_files/usr/share/distr0/banner.sh"
+    hook = "system_files/etc/profile.d/zz-distr0-banner.sh"
+    check(f"{banner} exists", (ROOT / banner).is_file())
+    check(f"{hook} exists", (ROOT / hook).is_file())
+    if (ROOT / hook).is_file():
+        hook_text = read(hook)
+        check("the login banner only greets interactive shells", "$- == *i*" in hook_text)
+        check("the login banner greets once per session", "DISTR0_BANNER_SHOWN" in hook_text)
+        check("the login banner can be disabled", "DISTR0_NO_BANNER" in hook_text)
+    if (ROOT / banner).is_file():
+        result = subprocess.run(
+            ["bash", "-n", str(ROOT / banner)], capture_output=True, text=True, check=False
+        )
+        check("the banner text is valid bash", result.returncode == 0, result.stderr.strip())
+
+    preset_path = "system_files/usr/share/fastfetch/presets/distr0.jsonc"
+    preset: dict = {}
+    try:
+        loaded = json.loads(read(preset_path))
+    except (OSError, json.JSONDecodeError) as exc:
+        check("the fastfetch preset is valid JSON", False, str(exc))
+    else:
+        preset = loaded if isinstance(loaded, dict) else {}
+        check("the fastfetch preset is valid JSON", bool(preset))
+    mark = str((preset.get("logo") or {}).get("source", ""))
+    check(
+        "the fastfetch preset uses a mark that ships in the image",
+        bool(mark) and image_path(mark).is_file(),
+        f"logo.source: {mark or 'missing'}",
+    )
+    check("the fastfetch preset lists modules", bool(preset.get("modules")), f"{preset.get('modules')}")
+
+    build = read("build_files/build.sh")
+    check(
+        "build.sh compiles the gschema overrides",
+        "glib-compile-schemas /usr/share/glib-2.0/schemas" in build,
+        "an override that is not compiled is ignored by the desktop",
+    )
+    override = "system_files/usr/share/glib-2.0/schemas/zz0-distr0.gschema.override"
+    check(f"{override} exists", (ROOT / override).is_file())
+    if (ROOT / override).is_file():
+        text = read(override)
+        check("the gschema override sets the accent colour", "accent-color='blue'" in text)
+        check(
+            "the gschema override sets the window buttons",
+            "button-layout=':minimize,maximize,close'" in text,
+        )
+        check(
+            "the override sorts after the schemas it overrides",
+            Path(override).name.startswith("zz"),
+            Path(override).name,
+        )
+
+    gdm = "system_files/etc/dconf/db/gdm.d/01-distr0-gdm"
+    gdm_logo = "/usr/share/pixmaps/distr0-gdm-logo.png"
+    check(f"{gdm} exists", (ROOT / gdm).is_file())
+    if (ROOT / gdm).is_file():
+        check(
+            "GDM points at a wordmark that ships in the image",
+            f"logo='{gdm_logo}'" in read(gdm) and image_path(gdm_logo).is_file(),
+            gdm_logo,
+        )
+
+    branding = read("system_files/etc/dconf/db/distro.d/99-distr0-branding")
+    light = "/usr/share/backgrounds/distr0/distr0-wallpaper-light.png"
+    dark = "/usr/share/backgrounds/distr0/distr0-wallpaper.png"
+    check("light mode uses the light wallpaper", f"picture-uri='file://{light}'" in branding, light)
+    check("dark mode uses the dark wallpaper", f"picture-uri-dark='file://{dark}'" in branding, dark)
+    for rel in (light, dark):
+        size = png_size(image_path(rel))
+        check(
+            f"{rel} is a wallpaper-sized PNG",
+            size is not None and size[0] >= 1920 and size[1] >= 1080,
+            f"{size}",
+        )
+
+    shipped = sorted(
+        str(path.relative_to(ROOT))
+        for root in ASSET_ROOTS
+        for path in (ROOT / root).rglob("*")
+        if path.is_file()
+    )
+    assets = read("ASSETS.md")
+    undocumented = [path for path in shipped if path not in assets]
+    check("ASSETS.md documents every shipped image", not undocumented, f"undocumented: {undocumented}")
 
 
 def check_delivery() -> None:
@@ -323,6 +438,37 @@ def check_delivery() -> None:
     )
 
     check("scripts/layer-diff.py exists", (ROOT / "scripts/layer-diff.py").is_file())
+
+    # The self-test's failures are annotations, not just text in a log: a
+    # repository whose automation cannot read job logs still sees them.
+    for marker in ("::error title=DISTR0 self-test", "::warning title=bootc container lint"):
+        check(f"CI annotates {marker.split(' title=')[1].split('::')[0]} messages", marker in build)
+
+    # Publishing is the one thing a pull request must never do: a fork cannot
+    # write packages here, and an unreviewed commit must not become a tag users
+    # install. The gate is load-bearing, so it is checked rather than assumed.
+    try:
+        import yaml
+    except ModuleNotFoundError:
+        print("skip  pull requests never publish — PyYAML is not installed (CI installs it)")
+    else:
+        doc = yaml.safe_load(build) or {}
+        for name in ("Push To GHCR", "Sign container image", "Attest the SBOM"):
+            step = next(
+                (
+                    step
+                    for job in (doc.get("jobs") or {}).values()
+                    for step in job.get("steps") or []
+                    if step.get("name") == name
+                ),
+                {},
+            )
+            condition = str(step.get("if", ""))
+            check(
+                f"'{name}' never runs for a pull request",
+                "github.event_name != 'pull_request'" in condition and "refs/heads/" in condition,
+                f"if: {condition or 'missing'}",
+            )
     copilot = ROOT / ".github/copilot-instructions.md"
     check(
         "copilot instructions are the same file as AGENTS.md",
@@ -360,6 +506,7 @@ def check_docs() -> None:
         "AGENTS.md",
         "CONTRIBUTING.md",
         "SECURITY.md",
+        "ASSETS.md",
         "system_files/usr/share/doc/distr0/README.md",
     ):
         if not (ROOT / rel).exists():
@@ -564,6 +711,7 @@ def main() -> int:
     check_defaults()
     check_recipes()
     check_image_promises()
+    check_identity()
     check_delivery()
     check_docs()
     check_doc_paths()

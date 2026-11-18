@@ -1,0 +1,7 @@
+# The DISTR0 wordmark on the login screen.
+#
+# GDM reads the dconf profile named `gdm`, which includes system-db:gdm; files
+# here are merged into that database by `dconf update`. Only the logo is set:
+# everything else on the login screen stays GDM's and Bluefin's.
+[org/gnome/login-screen]
+logo='/usr/share/pixmaps/distr0-gdm-logo.png'

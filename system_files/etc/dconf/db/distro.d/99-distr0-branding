@@ -1,9 +1,13 @@
 # DISTR0 system defaults.
 # Files in /etc/dconf/db/distro.d are merged into the same database Bluefin
 # writes to; this one is numbered last so its keys win over 01-..08-.
+#
+# One design in two modes: `picture-uri` is the light-mode wallpaper and
+# `picture-uri-dark` the dark one, so switching mode in Settings shows the
+# matching image instead of the same picture twice.
 
 [org/gnome/desktop/background]
-picture-uri='file:///usr/share/backgrounds/distr0/distr0-wallpaper.png'
+picture-uri='file:///usr/share/backgrounds/distr0/distr0-wallpaper-light.png'
 picture-uri-dark='file:///usr/share/backgrounds/distr0/distr0-wallpaper.png'
 picture-options='zoom'
 primary-color='#070a18'

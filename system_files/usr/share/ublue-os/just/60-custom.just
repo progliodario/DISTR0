@@ -29,6 +29,18 @@ distr0-info:
     printf '\n'
     sudo bootc status | sed -n '1,25p'
 
+# Print the DISTR0 mark and a system summary (fastfetch), or the plain banner
+[group('DISTR0')]
+distr0-greeting:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    preset=/usr/share/fastfetch/presets/distr0.jsonc
+    if command -v fastfetch > /dev/null && [[ -r "${preset}" ]]; then
+        fastfetch --config "${preset}"
+    else
+        /usr/share/distr0/banner.sh
+    fi
+
 # Update the image, Flatpaks and containers in one go
 [group('DISTR0')]
 distr0-update:

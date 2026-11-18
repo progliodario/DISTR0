@@ -379,6 +379,17 @@ lint:
         actionlint -shellcheck= -pyflakes= .github/workflows/*.yml
     fi
 
+# Regenerate the raster assets committed under system_files/ (needs Pillow)
+[group('Utility')]
+assets:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! python3 -c 'import PIL' 2> /dev/null; then
+        echo "Pillow is required: python3 -m pip install pillow" >&2
+        exit 1
+    fi
+    python3 scripts/render-assets.py
+
 # Runs shfmt on all Bash scripts
 format:
     #!/usr/bin/env bash

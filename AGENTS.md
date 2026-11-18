@@ -65,6 +65,23 @@ Each of these is load-bearing, and most are enforced by `just lint`:
   installed app is idempotent, dropping the declaration is not.
 - **`os-release` is rewritten in `build.sh`, not shipped as a file.** It has no
   drop-in directory, and a static copy from git would freeze `VERSION_ID`.
+- **Pull requests never publish.** The push, sign and attest steps are gated on
+  `github.event_name != 'pull_request'` and the default branch, and the metadata
+  step declares only the tags that are actually pushed. A fork cannot write to
+  this repository's packages, and an unreviewed commit must not become a tag
+  someone installs.
+- **Desktop defaults are compiled, not assumed.** A `*.gschema.override` only
+  takes effect after `glib-compile-schemas` runs in `build.sh`, so the self-test
+  reads the value back through `gsettings` instead of trusting the file. dconf
+  drop-ins under `/etc/dconf/db/distro.d` and `/etc/dconf/db/gdm.d` are compiled
+  at boot by `dconf-update.service`, so they need nothing at build time.
+- **The login banner stays quiet.** `/etc/profile.d/zz-distr0-banner.sh` greets
+  interactive shells only, once per session, and can be turned off with
+  `DISTR0_NO_BANNER=1`; the text lives in `/usr/share/distr0/banner.sh`, so the
+  banner and `ujust distr0-greeting` cannot drift apart.
+- **Every shipped image is documented in `ASSETS.md`.** `validate.py` fails when
+  a file under `system_files/usr/share/{backgrounds,icons,pixmaps}` has no row:
+  art without provenance cannot be licensed or safely replaced.
 - **Nothing in `system_files/` is editable on a running system.** It is an
   overlay on a read-only `/`: changing a file means a new image.
 - **Recipe bodies are bash**, so they must stay `bash -n`/`shellcheck` clean.
@@ -95,7 +112,14 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 | `system_files/usr/share/flatpak/preinstall.d/distr0.preinstall` | GUI apps installed on first boot |
 | `system_files/usr/share/ublue-os/homebrew/preinstall.d/distr0-cli.Brewfile` | CLI tools installed on first login |
 | `system_files/usr/share/ublue-os/just/60-custom.just` | `ujust distr0-*` recipes, run on the device |
-| `system_files/usr/share/distr0/selftest.sh` | The image's own test: identity, overlay, policy, declarations, units |
+| `system_files/usr/share/distr0/selftest.sh` | The image's own test: identity, overlay, policy, declarations, desktop defaults, units |
+| `system_files/usr/share/distr0/banner.sh` | The greeting text, shared by the login banner and `ujust distr0-greeting` |
+| `system_files/etc/profile.d/zz-distr0-banner.sh` | Login hook: interactive shells only, once per session |
+| `system_files/usr/share/fastfetch/presets/distr0.jsonc` | fastfetch preset with the DISTR0 mark, shown on demand |
+| `system_files/usr/share/glib-2.0/schemas/zz0-distr0.gschema.override` | Desktop defaults, compiled by `build.sh` |
+| `system_files/etc/dconf/db/gdm.d/01-distr0-gdm` | Login-screen wordmark for GDM |
+| `ASSETS.md` | Provenance and regeneration of the shipped art |
+| `scripts/render-assets.py` | Renders the raster assets (`just assets`, needs Pillow) |
 | `tests/test_validate.py` | Unit tests for the checker itself (`just test-unit`) |
 | `.github/copilot-instructions.md` | Symlink to `AGENTS.md`, so every agent reads one file |
 | `system_files/etc/containers/` | Update-verification policy (`policy.json` scope + `registries.d`) |
@@ -119,7 +143,8 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 | Add a device command | A recipe in `60-custom.just`, then mention it in the README |
 | Verify a built image | `just test` (self-test in a container); `just test-unit` for the checker |
 | Bump the base or chunkah | `just check-updates`, then edit the digest in place |
-| Change branding | `build.sh` for `os-release`, `system_files/usr/share/{backgrounds,icons}` for art |
+| Change branding | `build.sh` for `os-release`, `system_files/usr/share/{backgrounds,icons,pixmaps}` for art, then `ASSETS.md` |
+| Change the greeting or the summary | `system_files/usr/share/distr0/banner.sh`, the fastfetch preset, or `ujust distr0-greeting` |
 | Change where the installer points | `disk_config/iso.toml` |
 
 ## Conventions
@@ -151,8 +176,9 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 CI proves: the image builds, the shipped self-test passes inside it, the image is
 rechunked, it is signed, the signature verifies with `cosign.pub` and is enforced
 against a throwaway key (`verify-image.yml`), and the SBOM attestation verifies
-too. `bootc container lint --fatal-warnings` runs advisory: read its log instead
-of assuming green.
+too. `bootc container lint --fatal-warnings` runs advisory and turns each warning
+into a run annotation: read those on the summary instead of assuming green, since
+the job log may need permissions the repository's automation does not have.
 
 CI cannot prove what the boot process does on real hardware — Flatpak
 synchronization at boot, `brew-preinstall`, dconf defaults. If you claim one of
