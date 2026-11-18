@@ -221,7 +221,8 @@ build_qcow2() {
         -v "${WORKDIR}/output:/output" \
         -v /var/lib/containers/storage:/var/lib/containers/storage \
         "${BIB_IMAGE}" \
-        --type qcow2 --config /config.toml --use-librepo=True --rootfs=btrfs "${IMAGE}" \
+        --type qcow2 --config /config.toml \
+        --use-librepo=True --rootfs=btrfs "${IMAGE}" \
         > "${WORKDIR}/bib.log" 2>&1; then
         annotate_log "bootc-image-builder" "${WORKDIR}/bib.log"
         die "bootc-image-builder failed, see ${WORKDIR}/bib.log"
@@ -328,6 +329,10 @@ wait_for_ssh() {
         fi
         sleep 5
     done
+    # Did it boot and only fail to answer SSH? The display says so even when the
+    # console log stopped at the kernel handover.
+    printf 'FAIL  framebuffer: %s\n' \
+        "$(screendump > /dev/null 2>&1 && analyse_screen 2>&1 || echo 'no screenshot')"
     guest_down
     die "the guest did not accept SSH within ${BOOT_TIMEOUT}s"
 }
@@ -346,7 +351,13 @@ wait_for_login() {
         fi
         sleep 5
     done
-    ssh_do 'systemctl status gdm.service --no-pager | tail -n 20' 2>&1 || true
+    # The job log may be unreadable, so the reason travels as annotations.
+    ssh_do 'systemctl status gdm.service --no-pager | tail -n 5' 2>&1 | while IFS= read -r line; do
+        [[ -n ${line} ]] && printf 'FAIL  gdm: %s\n' "${line}"
+    done
+    ssh_do 'journalctl -u gdm.service --no-pager -n 5' 2>&1 | while IFS= read -r line; do
+        [[ -n ${line} ]] && printf 'FAIL  gdm journal: %s\n' "${line}"
+    done
     die "GDM did not reach the login screen within ${LOGIN_TIMEOUT}s"
 }
 
