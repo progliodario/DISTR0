@@ -149,6 +149,32 @@ trap stop_vm EXIT
 build_qcow2() {
     need podman
 
+    # The annotations are how this failure becomes readable: the job log needs
+    # permissions the repository's own automation may not have.
+    annotate_log() {
+        local prefix="$1" log="$2" line
+        tail -n 20 "${log}" | while IFS= read -r line; do
+            [[ -n ${line} ]] && printf 'FAIL  %s: %s\n' "${prefix}" "${line}"
+        done
+        return 0
+    }
+
+    # Registry hiccups are common enough on shared runners that a single pull
+    # attempt should not decide whether the image gets booted, and the retry
+    # output is what a failed annotation shows.
+    pull_image() {
+        local ref="$1" log="$2" attempt output
+        for attempt in 1 2 3; do
+            if output="$("${SUDO[@]}" podman pull "${ref}" 2>&1)"; then
+                printf '%s\n' "${output}" >> "${log}"
+                return 0
+            fi
+            printf 'pull attempt %d failed:\n%s\n' "${attempt}" "${output}" >> "${log}"
+            sleep 10
+        done
+        return 1
+    }
+
     local config="${WORKDIR}/boot-gate.toml"
     local public_key
     public_key="$(cat "${WORKDIR}/id_ed25519.pub")"
@@ -159,9 +185,15 @@ build_qcow2() {
     fi
 
     say "Pulling ${IMAGE}"
-    if ! "${SUDO[@]}" podman pull "${IMAGE}" > "${WORKDIR}/pull.log" 2>&1; then
-        tail -n 20 "${WORKDIR}/pull.log" >&2 || true
+    if ! pull_image "${IMAGE}" "${WORKDIR}/pull.log"; then
+        annotate_log "podman pull" "${WORKDIR}/pull.log"
         die "could not pull ${IMAGE}"
+    fi
+
+    say "Pulling bootc-image-builder"
+    if ! pull_image "${BIB_IMAGE}" "${WORKDIR}/bib-pull.log"; then
+        annotate_log "bootc-image-builder pull" "${WORKDIR}/bib-pull.log"
+        die "could not pull ${BIB_IMAGE}"
     fi
 
     if [[ -n ${EXPECT_REVISION} ]]; then
@@ -182,15 +214,15 @@ build_qcow2() {
     fi
 
     say "Building the qcow2 with bootc-image-builder (this takes a few minutes)"
-    if ! "${SUDO[@]}" podman run --rm --privileged --pull=newer --net=host \
+    if ! "${SUDO[@]}" podman run --rm --privileged --pull=missing --net=host \
         "${selinux[@]}" \
         -v "${config}:/config.toml:ro" \
         -v "${WORKDIR}/output:/output" \
         -v /var/lib/containers/storage:/var/lib/containers/storage \
         "${BIB_IMAGE}" \
-        --type qcow2 --use-librepo=True --rootfs=btrfs "${IMAGE}" \
+        --type qcow2 --config /config.toml --use-librepo=True --rootfs=btrfs "${IMAGE}" \
         > "${WORKDIR}/bib.log" 2>&1; then
-        tail -n 40 "${WORKDIR}/bib.log" >&2 || true
+        annotate_log "bootc-image-builder" "${WORKDIR}/bib.log"
         die "bootc-image-builder failed, see ${WORKDIR}/bib.log"
     fi
     "${SUDO[@]}" chown -R "$(id -u):$(id -g)" "${WORKDIR}/output"
@@ -262,7 +294,10 @@ ssh_do() {
 
 guest_down() {
     say "The guest console ends with:"
-    tail -n 40 "${WORKDIR}/console.log" 2> /dev/null || true
+    tail -n 40 "${WORKDIR}/console.log" 2> /dev/null | while IFS= read -r line; do
+        [[ -n ${line} ]] && printf 'FAIL  guest console: %s\n' "${line}"
+    done
+    return 0
 }
 
 wait_for_ssh() {
