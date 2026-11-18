@@ -72,7 +72,20 @@ jobs:
             args+=(--expect-revision "${EXPECTED_REVISION}")
           fi
 
-          if scripts/boot-gate.sh "${args[@]}" > "${report}" 2>&1; then
+          # Stream the report so each phase becomes a notice while the gate is
+          # still running: a slow run then says where it stopped instead of
+          # leaving the job timeout as the only clue.
+          set +e
+          scripts/boot-gate.sh "${args[@]}" 2>&1 | while IFS= read -r line; do
+            printf '%s\n' "${line}" >> "${report}"
+            case "${line}" in
+              PHASE\ *) echo "::notice title=DISTR0 boot gate::${line#PHASE }" ;;
+            esac
+          done
+          status=${PIPESTATUS[0]}
+          set -e
+
+          if [[ ${status} -eq 0 ]]; then
             cat "${report}"
             exit 0
           fi

@@ -47,6 +47,9 @@ SSH_OPTS=(
 SUDO=()
 
 say() { printf '%s\n' "$*"; }
+# The workflow turns these into notices while the gate runs, so a slow run
+# reports the phase it reached before the job timeout cancels it.
+phase() { printf 'PHASE %s\n' "$*"; }
 
 die() {
     printf 'FAIL  %s\n' "$*" >&2
@@ -158,10 +161,12 @@ build_qcow2() {
     # Registry hiccups are common enough on shared runners that a single pull
     # attempt should not decide whether the image gets booted, and the retry
     # output is what a failed annotation shows.
+    # A stalled connection hangs podman pull forever, which no retry would
+    # reach; timeout makes a hung attempt a failed attempt.
     pull_image() {
         local ref="$1" log="$2" attempt output
         for attempt in 1 2 3; do
-            if output="$("${SUDO[@]}" podman pull "${ref}" 2>&1)"; then
+            if output="$(timeout 900 "${SUDO[@]}" podman pull "${ref}" 2>&1)"; then
                 printf '%s\n' "${output}" >> "${log}"
                 return 0
             fi
@@ -185,12 +190,14 @@ build_qcow2() {
         annotate_log "podman pull" "${WORKDIR}/pull.log"
         die "could not pull ${IMAGE}"
     fi
+    phase "pulled ${IMAGE}"
 
     say "Pulling bootc-image-builder"
     if ! pull_image "${BIB_IMAGE}" "${WORKDIR}/bib-pull.log"; then
         annotate_log "bootc-image-builder pull" "${WORKDIR}/bib-pull.log"
         die "could not pull ${BIB_IMAGE}"
     fi
+    phase "pulled bootc-image-builder"
 
     if [[ -n ${EXPECT_REVISION} ]]; then
         local revision
@@ -215,7 +222,10 @@ build_qcow2() {
     mkdir -p "${WORKDIR}/output"
 
     say "Building the qcow2 with bootc-image-builder (this takes a few minutes)"
-    if ! "${SUDO[@]}" podman run --rm --privileged --pull=missing --net=host \
+    phase "building the qcow2 with bootc-image-builder"
+    # BIB assembles a full disk image; an unbounded run would hit the job
+    # timeout and report nothing. 45 minutes is generous for a shared runner.
+    if ! timeout 2700 "${SUDO[@]}" podman run --rm --privileged --pull=missing --net=host \
         "${selinux[@]}" \
         -v "${config}:/config.toml:ro" \
         -v "${WORKDIR}/output:/output" \
@@ -228,6 +238,7 @@ build_qcow2() {
         die "bootc-image-builder failed, see ${WORKDIR}/bib.log"
     fi
     "${SUDO[@]}" chown -R "$(id -u):$(id -g)" "${WORKDIR}/output"
+    phase "built the qcow2"
 
     QCOW2="${WORKDIR}/output/qcow2/disk.qcow2"
     [[ -f ${QCOW2} ]] || die "bootc-image-builder produced no qcow2 at ${QCOW2}"
@@ -321,6 +332,7 @@ wait_for_ssh() {
     while ((SECONDS < deadline)); do
         if ssh_do true > /dev/null 2>&1; then
             say "The guest accepted SSH."
+            phase "the guest accepted SSH"
             return 0
         fi
         if ! qemu_running; then
@@ -343,6 +355,7 @@ wait_for_login() {
         if ssh_do 'systemctl is-active --quiet gdm.service && pgrep -u gdm -x gnome-shell > /dev/null' \
             > /dev/null 2>&1; then
             say "GDM is running the greeter."
+            phase "GDM is running the greeter"
             return 0
         fi
         if ! qemu_running; then
@@ -405,6 +418,7 @@ wait_for_paint() {
     while ((SECONDS < deadline)); do
         if screendump > "${WORKDIR}/qmp.log" 2>&1 && detail="$(analyse_screen 2>&1)"; then
             say "ok    the login screen painted (${detail})"
+            phase "the login screen painted"
             return 0
         fi
         sleep 5
@@ -440,6 +454,7 @@ fi
 [[ -f ${QCOW2} ]] || die "no disk image at ${QCOW2}"
 
 boot_vm
+phase "booting the disk"
 wait_for_ssh
 wait_for_login
 
