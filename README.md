@@ -17,6 +17,7 @@ sudo systemctl reboot
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, the verification loop, pull request checklist |
 | [SECURITY.md](SECURITY.md) | Reporting a vulnerability, the trust model, signing-key rotation |
 | [ASSETS.md](ASSETS.md) | Where every shipped image comes from, and how to regenerate it |
+| [docs/claims.md](docs/claims.md) | Every promise the image makes, the check that proves it, and the gaps that are only tested on a real machine |
 
 ## What DISTR0 changes compared to its base
 
@@ -117,6 +118,32 @@ verifies against, so a Rekor outage cannot block a release.
 - `scripts/layer-diff.py` — compares the manifest of the published image with
   the new one and writes what an update will download into the run summary. The
   numbers above were measured this way.
+
+### The image is booted, not just built
+
+A container build cannot show GDM starting or the desktop reading a dconf
+database: that needs a systemd boot. `.github/workflows/boot-gate.yml` runs
+after every successful build on `main`, pulls the image that was just published,
+builds a qcow2 with bootc-image-builder and boots it in QEMU. It waits for the
+greeter, screenshots the framebuffer through QMP, and runs
+`scripts/boot-gate-checks.sh` inside the guest over SSH. Those checks compare the
+running system with the commit under test: the GDM wordmark and the light
+wallpaper by SHA-256, the greeter's and the desktop's compiled dconf databases,
+the login banner in an interactive login shell (once per session, silent in
+scripts, off with `DISTR0_NO_BANNER=1`), and the Italian locale, keymap and
+timezone. The screenshot and the log are uploaded with the run.
+
+```bash
+just boot-gate                                   # the published image
+just boot-gate ghcr.io/progliodario/distr0:latest "$(git rev-parse HEAD)"
+```
+
+It needs `podman` (for bootc-image-builder), `qemu`, `ssh` and `python3`; KVM
+makes the boot a couple of minutes, without it QEMU emulates. The gate refuses
+an image whose `org.opencontainers.image.revision` label is not the commit it
+checked out, so a green run cannot describe a different build. What the gate
+proves, and what is still only tested on a machine, is in
+[`docs/claims.md`](docs/claims.md).
 
 ## Verified updates on the device
 
@@ -285,6 +312,8 @@ instead of ten minutes into an image build.
 | `cosign.pub` | Public key used to verify published images |
 | `ASSETS.md` | Provenance and regeneration of every shipped image asset |
 | `scripts/render-assets.py` | Renders the wallpapers and the GDM wordmark (`just assets`) |
+| `scripts/boot-gate.sh` | Boots an image in QEMU and checks the running system (`just boot-gate`) |
+| `docs/claims.md` | Every promise, its mechanism, and the check that proves it — including the gaps |
 
 ## Customizing
 

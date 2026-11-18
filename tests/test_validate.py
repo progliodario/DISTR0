@@ -10,6 +10,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -120,3 +122,49 @@ def test_self_test_ships_with_the_image() -> None:
     # two can drift apart without either failing.
     assert "ghcr.io/progliodario/distr0" in text
     assert "sigstoreSigned" in text
+
+
+def test_claim_matrix_uses_known_verdicts() -> None:
+    rows = validate.claim_rows()
+    assert len(rows) >= 12
+    assert all(len(row) == 4 for row in rows)
+    verdicts = {verdict.strip().lower() for row in rows for verdict in row[3].split("+")}
+    assert verdicts <= validate.CLAIM_STATUSES
+    # The gaps stay visible on purpose: an all-green matrix would be a lie.
+    assert "machine only" in verdicts
+
+
+def test_boot_gate_config_is_a_gate_only_disk_config() -> None:
+    doc = tomllib.loads((ROOT / "disk_config/boot-gate.toml").read_text(encoding="utf-8"))
+    customizations = doc["customizations"]
+    assert [user["name"] for user in customizations["user"]] == ["gate"]
+    assert customizations["user"][0]["key"] == "__DISTR0_BOOT_GATE_SSH_KEY__"
+    assert "sshd" in customizations["services"]["enabled"]
+
+
+def test_screen_stats_tell_a_desktop_from_a_black_frame(tmp_path: Path) -> None:
+    script = ROOT / "scripts/screen-stats.py"
+    header = b"P6\n64 64\n255\n"
+    blank = tmp_path / "blank.ppm"
+    blank.write_bytes(header + b"\x00" * (64 * 64 * 3))
+    painted = tmp_path / "painted.ppm"
+    painted.write_bytes(header + bytes((index * 7) % 256 for index in range(64 * 64 * 3)))
+
+    # A black frame must fail, or the gate would call a dead display a login screen.
+    assert subprocess.run([sys.executable, str(script), str(blank)], check=False).returncode == 1
+    assert subprocess.run([sys.executable, str(script), str(painted)], check=False).returncode == 0
+
+
+def test_boot_gate_checks_are_valid_bash_and_cover_the_identity() -> None:
+    script = ROOT / "scripts/boot-gate-checks.sh"
+    assert subprocess.run(["bash", "-n", str(script)], check=False).returncode == 0
+    text = script.read_text(encoding="utf-8")
+    for marker in (
+        "EXPECT_GDM_LOGO_SHA256",
+        "EXPECT_LIGHT_WALLPAPER_SHA256",
+        "EXPECT_BANNER_SHA256",
+        "DISTR0_NO_BANNER",
+        "/org/gnome/login-screen/logo",
+        "/org/gnome/desktop/background/picture-uri",
+    ):
+        assert marker in text

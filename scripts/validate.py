@@ -130,8 +130,10 @@ def check_supply_chain() -> None:
 
     workflow = read(".github/workflows/build-disk.yml")
     justfile = read("Justfile")
+    gate = read("scripts/boot-gate.sh")
     in_workflow = re.search(r"bootc-image-builder@(sha256:[0-9a-f]{64})", workflow)
     in_justfile = re.search(r"bootc-image-builder@(sha256:[0-9a-f]{64})", justfile)
+    in_gate = re.search(r"bootc-image-builder@(sha256:[0-9a-f]{64})", gate)
     check(
         "build-disk.yml pins bootc-image-builder by digest",
         in_workflow is not None,
@@ -142,11 +144,17 @@ def check_supply_chain() -> None:
         in_justfile is not None,
         "expected quay.io/centos-bootc/bootc-image-builder@sha256:…",
     )
-    if in_workflow and in_justfile:
+    check(
+        "scripts/boot-gate.sh pins bootc-image-builder by digest",
+        in_gate is not None,
+        "the gate must build its disk from the same pinned builder",
+    )
+    if in_workflow and in_justfile and in_gate:
+        digests = {in_workflow.group(1), in_justfile.group(1), in_gate.group(1)}
         check(
-            "workflow and Justfile use the same bootc-image-builder digest",
-            in_workflow.group(1) == in_justfile.group(1),
-            f"{in_workflow.group(1)} vs {in_justfile.group(1)}",
+            "build-disk.yml, Justfile and boot-gate.sh use the same bootc-image-builder digest",
+            len(digests) == 1,
+            f"{sorted(digests)}",
         )
 
     verify = ROOT / ".github/workflows/verify-image.yml"
@@ -241,7 +249,16 @@ def check_recipes() -> None:
             re.search(rf"^{recipe}\b", custom, re.MULTILINE) is not None,
         )
     justfile = read("Justfile")
-    for recipe in ("build", "rechunk", "lint", "assets", "check-updates", "test", "test-unit"):
+    for recipe in (
+        "build",
+        "rechunk",
+        "lint",
+        "assets",
+        "check-updates",
+        "test",
+        "test-unit",
+        "boot-gate",
+    ):
         check(
             f"Justfile defines {recipe}",
             re.search(rf"^{recipe}\b", justfile, re.MULTILINE) is not None,
@@ -411,6 +428,158 @@ def check_identity() -> None:
     check("ASSETS.md documents every shipped image", not undocumented, f"undocumented: {undocumented}")
 
 
+CLAIM_STATUSES = {
+    "boot gate",
+    "image self-test",
+    "repository check",
+    "registry check",
+    "measurement",
+    "machine only",
+}
+
+CLAIMS = "docs/claims.md"
+
+
+def claim_rows(rel: str = CLAIMS) -> list[list[str]]:
+    """The data rows of the promises table, without header and separator."""
+    rows: list[list[str]] = []
+    for line in read(rel).splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if cells[0] == "Promise" or set(cells[0]) <= {"-", ":"}:
+            continue
+        rows.append(cells)
+    return rows
+
+
+def check_boot_gate() -> None:
+    """The gate is the only place a promise about a *booted* system can live."""
+    workflow = ROOT / ".github/workflows/boot-gate.yml"
+    check(".github/workflows/boot-gate.yml exists", workflow.is_file())
+    if workflow.is_file():
+        text = workflow.read_text(encoding="utf-8")
+        try:
+            import yaml
+        except ModuleNotFoundError:
+            yaml = None
+        if yaml is not None:
+            doc = yaml.safe_load(text) or {}
+            triggers = doc.get("on") or doc.get(True) or {}
+            run = triggers.get("workflow_run") if isinstance(triggers, dict) else None
+            check(
+                "the boot gate follows a successful build on main",
+                isinstance(run, dict)
+                and "main" in (run.get("branches") or [])
+                and "completed" in (run.get("types") or [])
+                and "conclusion == 'success'" in text,
+                f"workflow_run: {run}",
+            )
+        else:
+            check(
+                "the boot gate follows a successful build on main",
+                "workflow_run" in text and "conclusion == 'success'" in text,
+            )
+        check(
+            "the boot gate checks out the commit that was built",
+            "workflow_run.head_sha" in text,
+        )
+        check("the boot gate runs the shipped script", "scripts/boot-gate.sh" in text)
+        check("the boot gate can also be started by hand", "workflow_dispatch" in text)
+        check("the boot gate keeps the login screen", "login-screen.ppm" in text)
+
+    script = ROOT / "scripts/boot-gate.sh"
+    check("scripts/boot-gate.sh exists", script.is_file())
+    if script.is_file():
+        text = script.read_text(encoding="utf-8")
+        check("the gate boots QEMU", "qemu-system-x86_64" in text)
+        check("the gate waits for GDM", "gdm.service" in text)
+        check("the gate screenshots the framebuffer", "screendump" in text)
+        check("the gate runs the in-guest checks", "scripts/boot-gate-checks.sh" in text)
+        check(
+            "the gate refuses an image built from another commit",
+            "--expect-revision" in text and "org.opencontainers.image.revision" in text,
+            "otherwise a green run can describe a different build",
+        )
+        check(
+            "the gate falls back to emulation without KVM",
+            "/dev/kvm" in text and "tcg" in text,
+        )
+
+    checks = ROOT / "scripts/boot-gate-checks.sh"
+    check("scripts/boot-gate-checks.sh exists", checks.is_file())
+    if checks.is_file():
+        text = checks.read_text(encoding="utf-8")
+        for label, marker in (
+            ("the GDM wordmark by hash", "EXPECT_GDM_LOGO_SHA256"),
+            ("the light wallpaper by hash", "EXPECT_LIGHT_WALLPAPER_SHA256"),
+            ("the banner by hash", "EXPECT_BANNER_SHA256"),
+            ("the greeter's compiled dconf database", "/org/gnome/login-screen/logo"),
+            ("the light wallpaper in dconf", "/org/gnome/desktop/background/picture-uri"),
+            ("the banner's interactive-only guard", "DISTR0_NO_BANNER"),
+            ("the Italian defaults", "localectl"),
+        ):
+            check(f"the boot gate checks {label}", marker in text)
+
+    config = ROOT / "disk_config/boot-gate.toml"
+    check("disk_config/boot-gate.toml exists", config.is_file())
+    if config.is_file():
+        try:
+            doc = tomllib.loads(config.read_text(encoding="utf-8"))
+        except tomllib.TOMLDecodeError as exc:
+            check("the gate disk config is valid TOML", False, str(exc))
+        else:
+            check("the gate disk config is valid TOML", True)
+            customizations = doc.get("customizations", {})
+            users = customizations.get("user", [])
+            people = [user.get("name") for user in users if isinstance(user, dict)]
+            check("the gate disk config declares the gate user", people == ["gate"], f"{people}")
+            key = users[0].get("key", "") if users else ""
+            check(
+                "the gate key is a placeholder, not a committed key",
+                key == "__DISTR0_BOOT_GATE_SSH_KEY__",
+                key or "missing",
+            )
+            services = customizations.get("services", {})
+            check(
+                "the gate disk config enables sshd",
+                "sshd" in services.get("enabled", []),
+                f"{services}",
+            )
+
+
+def check_claims() -> None:
+    """Every promise should name the check that would catch it breaking."""
+    check(f"{CLAIMS} exists", (ROOT / CLAIMS).is_file())
+    if not (ROOT / CLAIMS).is_file():
+        return
+    rows = claim_rows()
+    check("the claims matrix lists at least a dozen promises", len(rows) >= 12, f"{len(rows)} rows")
+    malformed = [row[0] for row in rows if len(row) != 4]
+    check("every claim names a promise, a source, a check and a verdict", not malformed, f"{malformed}")
+    unknown = sorted(
+        {
+            verdict.strip().lower()
+            for row in rows
+            if len(row) == 4
+            for verdict in row[3].split("+")
+            if verdict.strip().lower() not in CLAIM_STATUSES
+        }
+    )
+    check("every claim verdict is one the matrix defines", not unknown, f"{unknown}")
+    check("the claims matrix admits what is not verified", "## Not verified here" in read(CLAIMS))
+    check(
+        "README links the claims matrix from its documentation table",
+        "[docs/claims.md](docs/claims.md)" in read("README.md"),
+        "the table is where a reader looks for it",
+    )
+    check("AGENTS.md points at the claims matrix", "docs/claims.md" in read("AGENTS.md"))
+    check(
+        "the boot gate is described where it runs",
+        "scripts/boot-gate.sh" in read(CLAIMS) and "scripts/boot-gate-checks.sh" in read(CLAIMS),
+    )
+
+
 def check_delivery() -> None:
     """What the workflows must keep doing for the published image."""
     build = read(".github/workflows/build.yml")
@@ -489,6 +658,7 @@ def check_cosign_commands() -> None:
         "README.md",
         "AGENTS.md",
         "SECURITY.md",
+        CLAIMS,
         "system_files/usr/share/doc/distr0/README.md",
     ):
         if not (ROOT / rel).exists():
@@ -534,6 +704,7 @@ def check_docs() -> None:
         "CONTRIBUTING.md",
         "SECURITY.md",
         "ASSETS.md",
+        "docs/claims.md",
         "system_files/usr/share/doc/distr0/README.md",
     ):
         if not (ROOT / rel).exists():
@@ -655,6 +826,7 @@ def check_doc_paths() -> None:
     for rel, heading, minimum in (
         ("README.md", None, 10),
         ("AGENTS.md", "## Map", 10),
+        (CLAIMS, None, 8),
     ):
         if not (ROOT / rel).exists():
             check(f"{rel} exists", False)
@@ -679,6 +851,7 @@ def check_doc_paths() -> None:
         "AGENTS.md",
         "CONTRIBUTING.md",
         "SECURITY.md",
+        CLAIMS,
         "system_files/usr/share/doc/distr0/README.md",
     ):
         if not (ROOT / rel).exists():
@@ -739,6 +912,8 @@ def main() -> int:
     check_recipes()
     check_image_promises()
     check_identity()
+    check_boot_gate()
+    check_claims()
     check_delivery()
     check_cosign_commands()
     check_docs()

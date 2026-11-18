@@ -1,0 +1,19 @@
+# Disk for the QEMU boot gate (`.github/workflows/boot-gate.yml`,
+# `just boot-gate`). It is not shipped in the image: its only job is to give the
+# gate a user it can SSH in as. The public key is generated per run and
+# substituted for the placeholder by scripts/boot-gate.sh, so nothing secret is
+# ever committed; the gate checks the shipped files by SHA-256, and an
+# unprivileged user is enough to read them.
+
+[[customizations.filesystem]]
+mountpoint = "/"
+minsize = "20 GiB"
+
+# Fedora Workstation does not enable sshd; the gate image has to.
+[customizations.services]
+enabled = ["sshd"]
+
+[[customizations.user]]
+name = "gate"
+groups = ["wheel"]
+key = "__DISTR0_BOOT_GATE_SSH_KEY__"

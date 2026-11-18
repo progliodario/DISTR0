@@ -474,3 +474,14 @@ test-unit:
         exit 1
     fi
     pytest -q tests
+
+# Boot an image in QEMU and check what only a booted system can prove
+[group('Test')]
+boot-gate image=("ghcr.io/progliodario/" + image_name + ":" + default_tag) revision="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    args=(--image "{{ image }}")
+    if [[ -n "{{ revision }}" ]]; then
+        args+=(--expect-revision "{{ revision }}")
+    fi
+    scripts/boot-gate.sh "${args[@]}"

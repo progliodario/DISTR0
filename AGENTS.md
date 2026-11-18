@@ -30,6 +30,7 @@ These do not run the image build:
 
 ```bash
 just build          # podman build -> localhost/distr0:latest (several minutes)
+just boot-gate      # boot the published image in QEMU and check what booted
 just rechunk        # chunkah, same split CI does
 just build-iso      # installer ISO via bootc-image-builder
 just run-vm-qcow2   # boot the qcow2 in a browser VM
@@ -82,6 +83,16 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 - **Every shipped image is documented in `ASSETS.md`.** `validate.py` fails when
   a file under `system_files/usr/share/{backgrounds,icons,pixmaps}` has no row:
   art without provenance cannot be licensed or safely replaced.
+- **A promise is only as good as the check behind it.** `docs/claims.md` maps
+  every claim the README makes to the check that would catch it breaking, and
+  says which ones are only tested on a real machine. Adding a claim means adding
+  a row and, where possible, a check; marking something `machine only` while the
+  README presents it as proven is a documentation bug.
+- **The boot gate runs the image users get, not a local build.** It pulls the
+  tag, refuses an image whose `org.opencontainers.image.revision` label is not
+  the commit it checked out, and compares the booted files with this repository
+  by SHA-256. Do not make it succeed when the registry is slow or the boot times
+  out: a skipped boot is not a boot.
 - **Nothing in `system_files/` is editable on a running system.** It is an
   overlay on a read-only `/`: changing a file means a new image.
 - **Recipe bodies are bash**, so they must stay `bash -n`/`shellcheck` clean.
@@ -119,6 +130,11 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 | `system_files/usr/share/glib-2.0/schemas/zz0-distr0.gschema.override` | Desktop defaults, compiled by `build.sh` |
 | `system_files/etc/dconf/db/gdm.d/01-distr0-gdm` | Login-screen wordmark for GDM |
 | `ASSETS.md` | Provenance and regeneration of the shipped art |
+| `docs/claims.md` | Every promise, the mechanism behind it and the check that proves it |
+| `scripts/boot-gate.sh` | Boots an image in QEMU, screenshots the login screen, runs the in-guest checks |
+| `scripts/boot-gate-checks.sh` | The checks that run inside the booted image, over SSH |
+| `disk_config/boot-gate.toml` | Gate-only disk config: an SSH user, never shipped |
+| `.github/workflows/boot-gate.yml` | Boots every image published on `main` |
 | `scripts/render-assets.py` | Renders the raster assets (`just assets`, needs Pillow) |
 | `tests/test_validate.py` | Unit tests for the checker itself (`just test-unit`) |
 | `.github/copilot-instructions.md` | Symlink to `AGENTS.md`, so every agent reads one file |
@@ -145,6 +161,7 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 | Bump the base or chunkah | `just check-updates`, then edit the digest in place |
 | Change branding | `build.sh` for `os-release`, `system_files/usr/share/{backgrounds,icons,pixmaps}` for art, then `ASSETS.md` |
 | Change the greeting or the summary | `system_files/usr/share/distr0/banner.sh`, the fastfetch preset, or `ujust distr0-greeting` |
+| Prove a new promise | Add the check to `system_files/usr/share/distr0/selftest.sh` or `scripts/boot-gate-checks.sh`, then a row in `docs/claims.md` |
 | Change where the installer points | `disk_config/iso.toml` |
 
 ## Conventions
@@ -180,6 +197,11 @@ too. `bootc container lint --fatal-warnings` runs advisory and turns each warnin
 into a run annotation: read those on the summary instead of assuming green, since
 the job log may need permissions the repository's automation does not have.
 
+The boot gate (`boot-gate.yml`) also proves that the published image boots to a
+GDM login screen, that the greeter reads the shipped wordmark and wallpaper, and
+that the banner and the Italian defaults are live on the running system.
+
 CI cannot prove what the boot process does on real hardware — Flatpak
-synchronization at boot, `brew-preinstall`, dconf defaults. If you claim one of
-those works, say it was not verified here.
+synchronization at boot, `brew-preinstall`, a user logging into a GNOME session,
+or anything about Wi-Fi and GPUs. `docs/claims.md` lists those gaps; if you
+claim one works, say it was not verified here.

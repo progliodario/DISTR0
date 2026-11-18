@@ -34,8 +34,9 @@ without them it skips those parts and still runs `scripts/validate.py`.
 4. Commit with an imperative subject and a body that explains *why*. One logical
    change per commit.
 5. Open a pull request. CI runs `Validate` (about a minute) and builds the image
-   without publishing it: pull requests get `sha-` and `pr-` tags only, `latest`
-   never moves.
+   without publishing it: a pull request publishes nothing, `latest` never
+   moves. Once the change is on `main`, the boot gate boots the published image
+   and checks it against [`docs/claims.md`](docs/claims.md).
 
 ## Pull request checklist
 

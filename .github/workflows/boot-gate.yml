@@ -1,0 +1,106 @@
+---
+# A container build cannot show GDM starting or the desktop reading a dconf
+# database: that needs a systemd boot. This gate boots the image that was just
+# published, waits for the login screen, screenshots the framebuffer and runs
+# scripts/boot-gate-checks.sh inside the guest. `docs/claims.md` maps each
+# promise to the check that proves it.
+name: Boot the published image
+
+on:
+  workflow_run:
+    workflows: ["Build container image"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Image reference to boot
+        required: false
+        default: ghcr.io/progliodario/distr0:latest
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ${{ github.event.inputs.image || 'ghcr.io/progliodario/distr0:latest' }}
+  # Set for workflow_run, empty for a manual dispatch. The gate refuses an image
+  # whose OCI revision label does not match, so a run can never report on a
+  # different commit than the one it checked out.
+  EXPECTED_REVISION: ${{ github.event.workflow_run.head_sha || '' }}
+
+jobs:
+  boot:
+    name: Boot to the login screen
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Maximize build space
+        uses: ublue-os/remove-unwanted-software@695eb75bc387dbcd9685a8e72d23439d8686cba6
+
+      - name: Install QEMU
+        run: |
+          set -xeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 \
+            ovmf \
+            openssh-client
+          qemu-system-x86_64 --version
+
+      - name: Boot the image and check the running system
+        run: |
+          set -xeuo pipefail
+          workdir="${RUNNER_TEMP}/boot-gate"
+          mkdir -p "${workdir}"
+          report="${workdir}/boot-gate.log"
+
+          args=(--image "${IMAGE}" --workdir "${workdir}")
+          if [[ -n "${EXPECTED_REVISION}" ]]; then
+            args+=(--expect-revision "${EXPECTED_REVISION}")
+          fi
+
+          if scripts/boot-gate.sh "${args[@]}" > "${report}" 2>&1; then
+            cat "${report}"
+            exit 0
+          fi
+
+          cat "${report}"
+          # One annotation per failed check: the job log needs permissions the
+          # repository's own automation may not have, annotations do not.
+          annotated=0
+          while IFS= read -r line; do
+            case "${line}" in
+              FAIL*)
+                echo "::error title=DISTR0 boot gate::${line}"
+                annotated=$((annotated + 1))
+                ;;
+            esac
+          done < "${report}"
+          if [[ ${annotated} -eq 0 ]]; then
+            echo "::error title=DISTR0 boot gate::$(tail -n 1 "${report}")"
+          fi
+          exit 1
+
+      - name: Upload the login screen and the log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: boot-gate
+          path: |
+            ${{ runner.temp }}/boot-gate/login-screen.ppm
+            ${{ runner.temp }}/boot-gate/boot-gate.log
+            ${{ runner.temp }}/boot-gate/console.log
+            ${{ runner.temp }}/boot-gate/qmp.log
+          if-no-files-found: warn
+          retention-days: 7
