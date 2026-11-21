@@ -305,10 +305,19 @@ PY
     phase "booting the disk (${accel})"
 }
 
-ssh_do() {
-    ssh "${SSH_OPTS[@]}" -p "${SSH_PORT}" -i "${WORKDIR}/id_ed25519" \
+# ConnectTimeout only covers the TCP connect: if the forwarded port accepts and
+# then says nothing, ssh waits for the banner forever. Every call is bounded so
+# a wait loop always reaches its deadline and can report why.
+ssh_run() {
+    local limit="$1"
+    shift
+    timeout "${limit}" ssh "${SSH_OPTS[@]}" -p "${SSH_PORT}" -i "${WORKDIR}/id_ed25519" \
         "${SSH_USER}@127.0.0.1" "$@"
 }
+
+ssh_do() { ssh_run 600 "$@"; }
+
+ssh_probe() { ssh_run 20 "$@"; }
 
 guest_down() {
     local status=unknown line
@@ -334,7 +343,7 @@ wait_for_ssh() {
     local start=$SECONDS
     local deadline=$((start + BOOT_TIMEOUT)) next_report=240 detail
     while ((SECONDS < deadline)); do
-        if ssh_do true > /dev/null 2>&1; then
+        if ssh_probe true > /dev/null 2>&1; then
             say "The guest accepted SSH."
             phase "the guest accepted SSH (T+$((SECONDS - start))s)"
             return 0
@@ -366,7 +375,7 @@ wait_for_ssh() {
 wait_for_login() {
     local deadline=$((SECONDS + LOGIN_TIMEOUT))
     while ((SECONDS < deadline)); do
-        if ssh_do 'systemctl is-active --quiet gdm.service && pgrep -u gdm -x gnome-shell > /dev/null' \
+        if ssh_probe 'systemctl is-active --quiet gdm.service && pgrep -u gdm -x gnome-shell > /dev/null' \
             > /dev/null 2>&1; then
             say "GDM is running the greeter."
             phase "GDM is running the greeter"
