@@ -61,6 +61,19 @@ jobs:
             openssh-client
           qemu-system-x86_64 --version
 
+      - name: Enable KVM
+        run: |
+          set -xeuo pipefail
+          # The runner user cannot join the kvm group mid-job and the device is
+          # root:kvm 0660, so QEMU would silently fall back to TCG and never
+          # reach a desktop. The udev rule is GitHub's documented way to expose
+          # it; without /dev/kvm the gate must fail here, not 40 minutes later.
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
       - name: Boot the image and check the running system
         run: |
           set -xeuo pipefail
@@ -68,7 +81,7 @@ jobs:
           mkdir -p "${workdir}"
           report="${workdir}/boot-gate.log"
 
-          args=(--image "${IMAGE}" --workdir "${workdir}")
+          args=(--image "${IMAGE}" --workdir "${workdir}" --require-kvm)
           if [[ -n "${EXPECTED_REVISION}" ]]; then
             args+=(--expect-revision "${EXPECTED_REVISION}")
           fi

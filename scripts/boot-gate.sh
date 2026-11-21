@@ -34,6 +34,7 @@ IMAGE=""
 QCOW2=""
 WORKDIR=""
 EXPECT_REVISION=""
+REQUIRE_KVM=""
 SSH_PORT=""
 QEMU_PID=""
 SSH_OPTS=(
@@ -65,6 +66,7 @@ Boot an image in QEMU and check the running system.
   --expect-revision SHA  refuse an image whose OCI revision label is not SHA
   --workdir DIR          keep the log and the screenshot here (default: mktemp)
   --timeout SECONDS      how long to wait for the guest to accept SSH
+  --require-kvm          fail instead of falling back to slow TCG emulation
   -h, --help             show this text
 EOF
 }
@@ -94,6 +96,10 @@ while [[ $# -gt 0 ]]; do
         --timeout)
             BOOT_TIMEOUT="${2:?--timeout needs a value}"
             shift 2
+            ;;
+        --require-kvm)
+            REQUIRE_KVM=1
+            shift
             ;;
         -h | --help)
             usage
@@ -251,6 +257,10 @@ boot_vm() {
     if [[ -w /dev/kvm ]]; then
         accel=kvm
         cpu=host
+    elif [[ -n ${REQUIRE_KVM} ]]; then
+        # A GNOME desktop under TCG needs far longer than the boot budget, so a
+        # gate that cannot accelerate is a gate that will fail slowly.
+        die "KVM is not available (/dev/kvm is not writable): enable it or run the gate on a machine that has it"
     fi
 
     port="$(python3 - <<'PY'
