@@ -302,6 +302,7 @@ PY
     QEMU_PID=$!
     SSH_PORT=${port}
     say "Booting ${QCOW2} (${accel}) with SSH on 127.0.0.1:${port}"
+    phase "booting the disk (${accel})"
 }
 
 ssh_do() {
@@ -328,16 +329,29 @@ guest_down() {
 }
 
 wait_for_ssh() {
-    local deadline=$((SECONDS + BOOT_TIMEOUT))
+    # Two progress notices keep the step under GitHub's ten-notices budget while
+    # still showing a stuck boot on the run page.
+    local start=$SECONDS
+    local deadline=$((start + BOOT_TIMEOUT)) next_report=240 detail
     while ((SECONDS < deadline)); do
         if ssh_do true > /dev/null 2>&1; then
             say "The guest accepted SSH."
-            phase "the guest accepted SSH"
+            phase "the guest accepted SSH (T+$((SECONDS - start))s)"
             return 0
         fi
         if ! qemu_running; then
             guest_down
             die "QEMU exited before the system came up"
+        fi
+        # A boot that never answers is otherwise indistinguishable from a slow
+        # runner; the framebuffer says whether the system got anywhere.
+        if ((SECONDS - start >= next_report)); then
+            detail="unavailable"
+            if screendump > /dev/null 2>&1; then
+                detail="$(analyse_screen 2>&1)" || detail="not painted (${detail})"
+            fi
+            phase "T+$((SECONDS - start))s: no SSH yet (framebuffer: ${detail})"
+            next_report=$((next_report + 360))
         fi
         sleep 5
     done
@@ -454,7 +468,6 @@ fi
 [[ -f ${QCOW2} ]] || die "no disk image at ${QCOW2}"
 
 boot_vm
-phase "booting the disk"
 wait_for_ssh
 wait_for_login
 

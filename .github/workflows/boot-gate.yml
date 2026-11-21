@@ -37,9 +37,10 @@ jobs:
     name: Boot to the login screen
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
-    # bootc-image-builder assembles a full disk image and pulls the container
-    # image on a shared runner: 20-30 minutes before the boot even starts.
-    timeout-minutes: 90
+    # bootc-image-builder assembles a full disk image and the gate pulls the
+    # container image first: on a slow shared runner that is an hour before the
+    # boot even starts, so the timeout has to cover the wait as well as it.
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
