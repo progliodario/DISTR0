@@ -218,37 +218,36 @@ ROOT_MOUNT=""
 ROOT_LOOP=""
 
 mount_installed_root() {
-    local disk="$1" part fstype opts_list=() opt
+    local disk="$1" part fstype opts_list=() opt attempt layout last_err=""
     ROOT_MOUNT="$(mktemp -d)"
     ROOT_LOOP="$("${SUDO[@]}" losetup --find --show --partscan "${disk}")"
     "${SUDO[@]}" partprobe "${ROOT_LOOP}" 2> /dev/null || true
-    "${SUDO[@]}" udevadm settle 2> /dev/null || true
-    for part in "${ROOT_LOOP}"p*; do
-        [[ -b ${part} ]] || continue
-        fstype="$("${SUDO[@]}" blkid -o value -s TYPE "${part}" 2> /dev/null || true)"
-        opts_list=()
-        case "${fstype}" in
-            # The installed root is normally the `root` subvolume; the default
-            # one is the fallback when the image lays it out differently.
-            btrfs) opts_list=("rw,subvol=root" "rw") ;;
-            xfs | ext4) opts_list=("rw") ;;
-            *) continue ;;
-        esac
-        for opt in "${opts_list[@]}"; do
-            if "${SUDO[@]}" mount -t "${fstype}" -o "${opt}" "${part}" "${ROOT_MOUNT}" 2> /dev/null; then
-                # The boot partition is ext4 too: only the root has /etc and
-                # /usr, so a wrong guess is unmounted rather than used.
-                if [[ -d ${ROOT_MOUNT}/etc && -d ${ROOT_MOUNT}/usr ]]; then
+    for attempt in $(seq 1 10); do
+        [[ -n "$(ls -A "${ROOT_LOOP}"p* 2> /dev/null)" ]] && break
+        sleep 1
+    done
+    layout="$("${SUDO[@]}" lsblk -rno NAME,FSTYPE,SIZE "${ROOT_LOOP}" 2> /dev/null | tr '\n' ' ')"
+    phase "disk partitions: ${layout:-none}"
+    # The root is the largest filesystem and normally btrfs; trying it before
+    # ext4 keeps the small boot partition out of the way entirely.
+    for fstype in btrfs xfs ext4; do
+        for part in "${ROOT_LOOP}"p*; do
+            [[ -b ${part} ]] || continue
+            [[ "$("${SUDO[@]}" blkid -o value -s TYPE "${part}" 2> /dev/null)" == "${fstype}" ]] || continue
+            opts_list=("rw")
+            [[ ${fstype} == btrfs ]] && opts_list=("rw,subvol=root" "rw")
+            for opt in "${opts_list[@]}"; do
+                if ! last_err="$("${SUDO[@]}" mount -t "${fstype}" -o "${opt}" "${part}" "${ROOT_MOUNT}" 2>&1)"; then
+                    continue
+                fi
+                if [[ -d ${ROOT_MOUNT}/etc ]]; then
                     return 0
                 fi
                 "${SUDO[@]}" umount "${ROOT_MOUNT}"
-            fi
+            done
         done
     done
-    "${SUDO[@]}" losetup -d "${ROOT_LOOP}" || true
-    rmdir "${ROOT_MOUNT}" 2> /dev/null || true
-    ROOT_MOUNT=""
-    die "could not mount the installed root (partitions: $("${SUDO[@]}" lsblk -rno NAME,FSTYPE "${ROOT_LOOP:-${disk}}" | tr '\n' ' '))"
+    die "could not mount the installed root (partitions: ${layout:-none}; last error: ${last_err:-none})"
 }
 
 umount_installed_root() {
@@ -259,10 +258,11 @@ umount_installed_root() {
 }
 
 # The checks run inside the booted system, started by a oneshot unit after the
-# display manager and writing to a file on the root filesystem: SSH needs sshd
-# (which this image does not enable) and the guest's own boot is the thing under
-# test. One sleep gives the gate time to capture the login screen before the
-# unit powers the machine off.
+# display manager: SSH needs sshd (which this image does not enable) and the
+# guest's own boot is the thing under test. The unit prints its report on the
+# serial console, which QEMU captures, so no filesystem of the installed system
+# has to be writable or readable afterwards. One sleep gives the gate time to
+# capture the login screen before the unit powers the machine off.
 install_guest_checks() {
     local disk="$1" root
     local logo light banner hook
@@ -277,7 +277,8 @@ install_guest_checks() {
         "${root}/etc/distr0-boot-gate-checks-body.sh"
     "${SUDO[@]}" tee "${root}/etc/distr0-boot-gate-checks.sh" > /dev/null <<EOF
 #!/bin/bash
-exec > /distr0-boot-gate.log 2>&1
+exec > /dev/ttyS0 2>&1
+echo "DISTR0-BOOT-GATE-BEGIN"
 sleep 45
 export EXPECT_GDM_LOGO_SHA256=${logo}
 export EXPECT_LIGHT_WALLPAPER_SHA256=${light}
@@ -285,6 +286,7 @@ export EXPECT_BANNER_SHA256=${banner}
 export EXPECT_BANNER_HOOK_SHA256=${hook}
 bash /etc/distr0-boot-gate-checks-body.sh
 echo "EXIT=\$?"
+echo "DISTR0-BOOT-GATE-END"
 sync
 poweroff -f
 EOF
@@ -319,19 +321,17 @@ wait_for_vm_exit() {
     wait "${QEMU_PID}" 2> /dev/null || true
 }
 
-# The log lives on the root filesystem; the machine is off, so a read-only
-# mount is enough. A missing log is itself a failure.
+# The report is on the serial console QEMU captured while the machine ran; a
+# missing report is itself a failure, and the tail of the console says why.
 read_guest_log() {
-    local disk="$1" log="${WORKDIR}/guest-checks.log" root
-    mount_installed_root "${disk}"
-    root="${ROOT_MOUNT}"
-    if [[ -f ${root}/distr0-boot-gate.log ]]; then
-        "${SUDO[@]}" cat "${root}/distr0-boot-gate.log" > "${log}"
+    local console="${WORKDIR}/console.log" log="${WORKDIR}/guest-checks.log"
+    if [[ -f ${console} ]]; then
+        sed -n '/^DISTR0-BOOT-GATE-BEGIN$/,/^DISTR0-BOOT-GATE-END$/p' \
+            "${console}" > "${log}"
     fi
-    umount_installed_root
-    if [[ ! -f ${log} ]]; then
-        say "FAIL  the guest wrote no check log (serial console:)"
-        tail -n 5 "${WORKDIR}/console.log" 2> /dev/null | while IFS= read -r line; do
+    if [[ ! -s ${log} ]]; then
+        say "FAIL  the guest left no check report on the serial console"
+        tail -n 8 "${console}" 2> /dev/null | while IFS= read -r line; do
             [[ -n ${line} ]] && printf 'FAIL  guest console: %s\n' "${line}"
         done
         return 1
@@ -505,7 +505,7 @@ wait_for_paint || paint_failures=1
 wait_for_vm_exit
 
 set +e
-read_guest_log "${DISK}"
+read_guest_log
 guest_failures=$?
 set -e
 
