@@ -5,7 +5,7 @@
 # can show that GDM reaches a login screen or that the desktop reads the files
 # this repository ships. This script installs the image to a raw disk with the
 # image's own installer, boots it, takes a screenshot of the framebuffer through
-# QMP, and runs scripts/boot-gate-checks.sh inside the guest over SSH.
+# QMP, and runs scripts/boot-gate-checks.sh inside the guest at boot.
 #
 # Usage:
 #   scripts/boot-gate.sh --image ghcr.io/progliodario/distr0:latest \
@@ -15,32 +15,21 @@
 # The first form is what `.github/workflows/boot-gate.yml` runs: it pulls the
 # published image, refuses one whose OCI revision label is not the commit under
 # test, and installs the image to a raw disk with the image's own installer.
-# Needs podman with sudo for that, plus qemu, ssh and python3.
+# Needs podman with sudo for that, plus qemu and python3.
 # KVM turns the boot into a couple of minutes; without it QEMU emulates, which
 # works but is slow.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SSH_USER="root"
-BOOT_TIMEOUT=900
-LOGIN_TIMEOUT=420
-PAINT_TIMEOUT=180
+PAINT_TIMEOUT=300
+POWEROFF_TIMEOUT=600
 
 IMAGE=""
 DISK=""
 WORKDIR=""
 EXPECT_REVISION=""
 REQUIRE_KVM=""
-SSH_PORT=""
 QEMU_PID=""
-SSH_OPTS=(
-    -o BatchMode=yes
-    -o StrictHostKeyChecking=no
-    -o UserKnownHostsFile=/dev/null
-    -o LogLevel=ERROR
-    -o ConnectTimeout=5
-    -o ServerAliveInterval=15
-)
 SUDO=()
 
 say() { printf '%s\n' "$*"; }
@@ -61,7 +50,6 @@ Boot an image in QEMU and check the running system.
   --disk FILE            boot an existing disk image instead
   --expect-revision SHA  refuse an image whose OCI revision label is not SHA
   --workdir DIR          keep the log and the screenshot here (default: mktemp)
-  --timeout SECONDS      how long to wait for the guest to accept SSH
   --require-kvm          fail instead of falling back to slow TCG emulation
   -h, --help             show this text
 EOF
@@ -87,10 +75,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --workdir)
             WORKDIR="${2:?--workdir needs a value}"
-            shift 2
-            ;;
-        --timeout)
-            BOOT_TIMEOUT="${2:?--timeout needs a value}"
             shift 2
             ;;
         --require-kvm)
@@ -121,11 +105,7 @@ if [[ ${EUID} -ne 0 ]]; then
     SUDO=(sudo)
 fi
 
-need ssh
-need ssh-keygen
 need python3
-
-ssh-keygen -q -t ed25519 -N '' -C "distr0-boot-gate" -f "${WORKDIR}/id_ed25519"
 
 say "Workdir: ${WORKDIR}"
 say ""
@@ -203,14 +183,12 @@ build_disk() {
     fi
 
     mkdir -p "${WORKDIR}/output"
-    cp "${WORKDIR}/id_ed25519.pub" "${WORKDIR}/output/gate.pub"
     local disk="${WORKDIR}/output/disk.raw"
     truncate -s 20G "${disk}"
 
     # bootc's own installer writes the image to a disk in a couple of minutes,
     # where bootc-image-builder assembles the same disk for the better part of
-    # an hour. The key goes into root so the checks can run over SSH; sshd is
-    # enabled on the installed disk afterwards.
+    # an hour. The checks are installed on the disk and run at boot.
     say "Installing ${IMAGE} to ${disk} with bootc install to-disk"
     phase "installing the image with bootc install to-disk"
     if ! timeout 1800 "${SUDO[@]}" podman run --rm --privileged --pid=host --ipc=host \
@@ -219,8 +197,7 @@ build_disk() {
         -v "${WORKDIR}/output:/output" \
         -v /var/lib/containers:/var/lib/containers \
         "${IMAGE}" bootc install to-disk --via-loopback --filesystem btrfs \
-        --skip-fetch-check \
-        --root-ssh-authorized-keys /output/gate.pub /output/disk.raw \
+        --skip-fetch-check /output/disk.raw \
         > "${WORKDIR}/install.log" 2>&1; then
         annotate_log "bootc install" "${WORKDIR}/install.log"
         die "bootc install failed, see ${WORKDIR}/install.log"
@@ -228,25 +205,27 @@ build_disk() {
     "${SUDO[@]}" chown -R "$(id -u):$(id -g)" "${WORKDIR}/output"
     phase "installed the disk"
 
-    enable_sshd "${disk}"
+    install_guest_checks "${disk}"
     DISK="${disk}"
     [[ -s ${DISK} ]] || die "bootc install produced no disk at ${DISK}"
 }
 
-# The image does not enable sshd, and only the installed system can: mount the
-# root filesystem of the fresh disk and add the wants link. The link is created
-# without looking for the unit: with a composefs /usr the unit lives in an
-# EROFS image, not in the directory the host sees.
-enable_sshd() {
-    local disk="$1" loop part fstype root mounted="" opt
-    root="$(mktemp -d)"
-    loop="$("${SUDO[@]}" losetup --find --show --partscan "${disk}")"
-    "${SUDO[@]}" partprobe "${loop}" 2> /dev/null || true
+# Mount the root filesystem of the fresh disk. bootc lays it out as a btrfs
+# subvolume, and composefs keeps /usr in an EROFS image rather than in the
+# directory the host sees, so neither is assumed here.
+ROOT_MOUNT=""
+ROOT_LOOP=""
+
+mount_installed_root() {
+    local disk="$1" part fstype opts_list=() opt
+    ROOT_MOUNT="$(mktemp -d)"
+    ROOT_LOOP="$("${SUDO[@]}" losetup --find --show --partscan "${disk}")"
+    "${SUDO[@]}" partprobe "${ROOT_LOOP}" 2> /dev/null || true
     "${SUDO[@]}" udevadm settle 2> /dev/null || true
-    for part in "${loop}"p*; do
+    for part in "${ROOT_LOOP}"p*; do
         [[ -b ${part} ]] || continue
         fstype="$("${SUDO[@]}" blkid -o value -s TYPE "${part}" 2> /dev/null || true)"
-        local opts_list=()
+        opts_list=()
         case "${fstype}" in
             # The installed root is normally the `root` subvolume; the default
             # one is the fallback when the image lays it out differently.
@@ -255,26 +234,104 @@ enable_sshd() {
             *) continue ;;
         esac
         for opt in "${opts_list[@]}"; do
-            if "${SUDO[@]}" mount -t "${fstype}" -o "${opt}" "${part}" "${root}" 2> /dev/null; then
-                "${SUDO[@]}" mkdir -p "${root}/etc/systemd/system/multi-user.target.wants"
-                "${SUDO[@]}" ln -sf /usr/lib/systemd/system/sshd.service \
-                    "${root}/etc/systemd/system/multi-user.target.wants/sshd.service"
-                mounted="${part}"
-                break
+            if "${SUDO[@]}" mount -t "${fstype}" -o "${opt}" "${part}" "${ROOT_MOUNT}" 2> /dev/null; then
+                return 0
             fi
         done
-        [[ -n ${mounted} ]] && break
     done
-    if [[ -n ${mounted} ]]; then
-        "${SUDO[@]}" umount "${root}"
-        phase "enabled sshd on $(basename "${mounted}")"
-    else
-        # The boot itself will say whether sshd is on; the partition list is
-        # the only useful clue if it is not.
-        phase "could not mount the installed root (partitions: $("${SUDO[@]}" lsblk -rno NAME,FSTYPE "${loop}" | tr '\n' ' '))"
+    "${SUDO[@]}" losetup -d "${ROOT_LOOP}" || true
+    rmdir "${ROOT_MOUNT}" 2> /dev/null || true
+    ROOT_MOUNT=""
+    die "could not mount the installed root (partitions: $("${SUDO[@]}" lsblk -rno NAME,FSTYPE "${ROOT_LOOP:-${disk}}" | tr '\n' ' '))"
+}
+
+umount_installed_root() {
+    "${SUDO[@]}" umount "${ROOT_MOUNT}"
+    "${SUDO[@]}" losetup -d "${ROOT_LOOP}" || true
+    rmdir "${ROOT_MOUNT}" 2> /dev/null || true
+    ROOT_MOUNT=""
+}
+
+# The checks run inside the booted system, started by a oneshot unit after the
+# display manager and writing to a file on the root filesystem: SSH needs sshd
+# (which this image does not enable) and the guest's own boot is the thing under
+# test. One sleep gives the gate time to capture the login screen before the
+# unit powers the machine off.
+install_guest_checks() {
+    local disk="$1" root
+    local logo light banner hook
+    logo="$(image_hash /usr/share/pixmaps/distr0-gdm-logo.png)"
+    light="$(image_hash /usr/share/backgrounds/distr0/distr0-wallpaper-light.png)"
+    banner="$(image_hash /usr/share/distr0/banner.sh)"
+    hook="$(image_hash /etc/profile.d/zz-distr0-banner.sh)"
+
+    mount_installed_root "${disk}"
+    root="${ROOT_MOUNT}"
+    "${SUDO[@]}" cp "${REPO_ROOT}/scripts/boot-gate-checks.sh" \
+        "${root}/etc/distr0-boot-gate-checks-body.sh"
+    "${SUDO[@]}" tee "${root}/etc/distr0-boot-gate-checks.sh" > /dev/null <<EOF
+#!/bin/bash
+exec > /distr0-boot-gate.log 2>&1
+sleep 45
+export EXPECT_GDM_LOGO_SHA256=${logo}
+export EXPECT_LIGHT_WALLPAPER_SHA256=${light}
+export EXPECT_BANNER_SHA256=${banner}
+export EXPECT_BANNER_HOOK_SHA256=${hook}
+bash /etc/distr0-boot-gate-checks-body.sh
+echo "EXIT=\$?"
+sync
+poweroff -f
+EOF
+    "${SUDO[@]}" tee "${root}/etc/systemd/system/distr0-boot-gate-checks.service" > /dev/null <<'EOF'
+[Unit]
+Description=DISTR0 boot gate checks
+After=display-manager.service
+[Service]
+Type=oneshot
+ExecStart=/etc/distr0-boot-gate-checks.sh
+TimeoutStartSec=300
+[Install]
+WantedBy=graphical.target
+EOF
+    "${SUDO[@]}" mkdir -p "${root}/etc/systemd/system/graphical.target.wants"
+    "${SUDO[@]}" ln -sf /etc/systemd/system/distr0-boot-gate-checks.service \
+        "${root}/etc/systemd/system/graphical.target.wants/distr0-boot-gate-checks.service"
+    umount_installed_root
+    phase "installed the in-guest checks"
+}
+
+wait_for_vm_exit() {
+    local deadline=$((SECONDS + POWEROFF_TIMEOUT))
+    while kill -0 "${QEMU_PID}" 2> /dev/null; do
+        if ((SECONDS >= deadline)); then
+            phase "the guest did not power off within ${POWEROFF_TIMEOUT}s"
+            guest_down
+            die "the guest did not finish the in-guest checks"
+        fi
+        sleep 5
+    done
+    wait "${QEMU_PID}" 2> /dev/null || true
+}
+
+# The log lives on the root filesystem; the machine is off, so a read-only
+# mount is enough. A missing log is itself a failure.
+read_guest_log() {
+    local disk="$1" log="${WORKDIR}/guest-checks.log" root
+    mount_installed_root "${disk}"
+    root="${ROOT_MOUNT}"
+    if [[ -f ${root}/distr0-boot-gate.log ]]; then
+        "${SUDO[@]}" cat "${root}/distr0-boot-gate.log" > "${log}"
     fi
-    "${SUDO[@]}" losetup -d "${loop}" || true
-    rmdir "${root}" 2> /dev/null || true
+    umount_installed_root
+    if [[ ! -f ${log} ]]; then
+        say "FAIL  the guest wrote no check log (serial console:)"
+        tail -n 5 "${WORKDIR}/console.log" 2> /dev/null | while IFS= read -r line; do
+            [[ -n ${line} ]] && printf 'FAIL  guest console: %s\n' "${line}"
+        done
+        return 1
+    fi
+    cat "${log}"
+    grep -q '^EXIT=0$' "${log}"
 }
 
 # qcow2 files start with "QFI\xfb"; anything else is a raw disk.
@@ -289,7 +346,7 @@ disk_format() {
 boot_vm() {
     need qemu-system-x86_64
 
-    local accel=tcg cpu=max port code="" vars="" pflash=()
+    local accel=tcg cpu=max code="" vars="" pflash=()
     local format
     format="$(disk_format "${DISK}")"
     if [[ -w /dev/kvm ]]; then
@@ -300,14 +357,6 @@ boot_vm() {
         # gate that cannot accelerate is a gate that will fail slowly.
         die "KVM is not available (/dev/kvm is not writable): enable it or run the gate on a machine that has it"
     fi
-
-    port="$(python3 - <<'PY'
-import socket
-with socket.socket() as sock:
-    sock.bind(("127.0.0.1", 0))
-    print(sock.getsockname()[1])
-PY
-)"
 
     # A bootc disk is UEFI-first. OVMF's code is read-only and its variable
     # store is copied per run, so two gates never share NVRAM.
@@ -342,37 +391,22 @@ PY
         "${pflash[@]}" \
         -vga std \
         -display none \
-        -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:${port}-:22" \
+        -nic "user,model=virtio-net-pci" \
         -qmp "unix:${WORKDIR}/qmp.sock,server=on,wait=off" \
         -serial "file:${WORKDIR}/console.log" \
         > "${WORKDIR}/qemu.log" 2>&1 &
 
     QEMU_PID=$!
-    SSH_PORT=${port}
-    say "Booting ${DISK} (${format}, ${accel}) with SSH on 127.0.0.1:${port}"
+    say "Booting ${DISK} (${format}, ${accel})"
     phase "booting the disk (${accel})"
 }
-
-# ConnectTimeout only covers the TCP connect: if the forwarded port accepts and
-# then says nothing, ssh waits for the banner forever. Every call is bounded so
-# a wait loop always reaches its deadline and can report why.
-ssh_run() {
-    local limit="$1"
-    shift
-    timeout "${limit}" ssh "${SSH_OPTS[@]}" -p "${SSH_PORT}" -i "${WORKDIR}/id_ed25519" \
-        "${SSH_USER}@127.0.0.1" "$@"
-}
-
-ssh_do() { ssh_run 600 "$@"; }
-
-ssh_probe() { ssh_run 20 "$@"; }
 
 guest_down() {
     local status=unknown line
     if [[ -n ${QEMU_PID} ]]; then
         set +e
-        # QEMU may still be running (the SSH wait timed out, the guest is just
-        # silent). Waiting on it here blocked the gate until the job timeout.
+        # QEMU may still be running (the guest is just silent). Waiting on it
+        # here blocked the gate until the job timeout.
         if kill -0 "${QEMU_PID}" 2> /dev/null; then
             stop_vm
             status=143
@@ -390,66 +424,6 @@ guest_down() {
         [[ -n ${line} ]] && printf 'FAIL  guest console: %s\n' "${line}"
     done
     return 0
-}
-
-wait_for_ssh() {
-    # Two progress notices keep the step under GitHub's ten-notices budget while
-    # still showing a stuck boot on the run page.
-    local start=$SECONDS
-    local deadline=$((start + BOOT_TIMEOUT)) next_report=240 detail
-    while ((SECONDS < deadline)); do
-        if ssh_probe true > /dev/null 2>&1; then
-            say "The guest accepted SSH."
-            phase "the guest accepted SSH (T+$((SECONDS - start))s)"
-            return 0
-        fi
-        if ! qemu_running; then
-            guest_down
-            die "QEMU exited before the system came up"
-        fi
-        # A boot that never answers is otherwise indistinguishable from a slow
-        # runner; the framebuffer says whether the system got anywhere.
-        if ((SECONDS - start >= next_report)); then
-            detail="unavailable"
-            if screendump > /dev/null 2>&1; then
-                detail="$(analyse_screen 2>&1)" || detail="not painted (${detail})"
-            fi
-            phase "T+$((SECONDS - start))s: no SSH yet (framebuffer: ${detail})"
-            next_report=$((next_report + 360))
-        fi
-        sleep 5
-    done
-    # Did it boot and only fail to answer SSH? The display says so even when the
-    # console log stopped at the kernel handover.
-    printf 'FAIL  framebuffer: %s\n' \
-        "$(screendump > /dev/null 2>&1 && analyse_screen 2>&1 || echo 'no screenshot')"
-    guest_down
-    die "the guest did not accept SSH within ${BOOT_TIMEOUT}s"
-}
-
-wait_for_login() {
-    local deadline=$((SECONDS + LOGIN_TIMEOUT))
-    while ((SECONDS < deadline)); do
-        if ssh_probe 'systemctl is-active --quiet gdm.service && pgrep -u gdm -x gnome-shell > /dev/null' \
-            > /dev/null 2>&1; then
-            say "GDM is running the greeter."
-            phase "GDM is running the greeter"
-            return 0
-        fi
-        if ! qemu_running; then
-            guest_down
-            die "QEMU exited before the login screen"
-        fi
-        sleep 5
-    done
-    # The job log may be unreadable, so the reason travels as annotations.
-    ssh_do 'systemctl status gdm.service --no-pager | tail -n 5' 2>&1 | while IFS= read -r line; do
-        [[ -n ${line} ]] && printf 'FAIL  gdm: %s\n' "${line}"
-    done
-    ssh_do 'journalctl -u gdm.service --no-pager -n 5' 2>&1 | while IFS= read -r line; do
-        [[ -n ${line} ]] && printf 'FAIL  gdm journal: %s\n' "${line}"
-    done
-    die "GDM did not reach the login screen within ${LOGIN_TIMEOUT}s"
 }
 
 screendump() {
@@ -511,20 +485,6 @@ image_hash() {
     sha256sum "${path}" | cut -d' ' -f1
 }
 
-run_guest_checks() {
-    local logo light banner hook
-    logo="$(image_hash /usr/share/pixmaps/distr0-gdm-logo.png)"
-    light="$(image_hash /usr/share/backgrounds/distr0/distr0-wallpaper-light.png)"
-    banner="$(image_hash /usr/share/distr0/banner.sh)"
-    hook="$(image_hash /etc/profile.d/zz-distr0-banner.sh)"
-
-    ssh_do "EXPECT_GDM_LOGO_SHA256=${logo} \
-EXPECT_LIGHT_WALLPAPER_SHA256=${light} \
-EXPECT_BANNER_SHA256=${banner} \
-EXPECT_BANNER_HOOK_SHA256=${hook} \
-bash -s" < "${REPO_ROOT}/scripts/boot-gate-checks.sh"
-}
-
 if [[ -n ${IMAGE} ]]; then
     build_disk
 fi
@@ -532,20 +492,16 @@ fi
 [[ -f ${DISK} ]] || die "no disk image at ${DISK}"
 
 boot_vm
-wait_for_ssh
-wait_for_login
 
 paint_failures=0
 wait_for_paint || paint_failures=1
 
+wait_for_vm_exit
+
 set +e
-run_guest_checks
+read_guest_log "${DISK}"
 guest_failures=$?
 set -e
-
-if ((guest_failures == 255)); then
-    say "FAIL  the guest stopped answering SSH while the checks were running"
-fi
 
 failures=$((paint_failures + guest_failures))
 say ""

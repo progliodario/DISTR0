@@ -491,7 +491,10 @@ def check_boot_gate() -> None:
             "bootc install to-disk" in text,
             "bootc-image-builder takes long enough that a gate would time out",
         )
-        check("the gate waits for GDM", "gdm.service" in text)
+        check(
+            "the gate waits for the login screen",
+            "wait_for_paint" in text and "screendump" in text,
+        )
         check("the gate screenshots the framebuffer", "screendump" in text)
         check("the gate runs the in-guest checks", "scripts/boot-gate-checks.sh" in text)
         check(
@@ -509,6 +512,7 @@ def check_boot_gate() -> None:
     if checks.is_file():
         text = checks.read_text(encoding="utf-8")
         for label, marker in (
+            ("GDM running in the guest", "gdm.service"),
             ("the GDM wordmark by hash", "EXPECT_GDM_LOGO_SHA256"),
             ("the light wallpaper by hash", "EXPECT_LIGHT_WALLPAPER_SHA256"),
             ("the banner by hash", "EXPECT_BANNER_SHA256"),

@@ -126,7 +126,7 @@ database: that needs a systemd boot. `.github/workflows/boot-gate.yml` runs
 after every successful build on `main`, pulls the image that was just published,
 installs it to a raw disk with `bootc install to-disk` and boots it in QEMU. It waits for the
 greeter, screenshots the framebuffer through QMP, and runs
-`scripts/boot-gate-checks.sh` inside the guest over SSH. Those checks compare the
+`scripts/boot-gate-checks.sh` inside the guest at boot. Those checks compare the
 running system with the commit under test: the GDM wordmark and the light
 wallpaper by SHA-256, the greeter's and the desktop's compiled dconf databases,
 the login banner in an interactive login shell (once per session, silent in
@@ -138,7 +138,7 @@ just boot-gate                                   # the published image
 just boot-gate ghcr.io/progliodario/distr0:latest "$(git rev-parse HEAD)"
 ```
 
-It needs `podman` (to pull the image and install it), `qemu`, `ssh` and `python3`; KVM
+It needs `podman` (to pull the image and install it), `qemu` and `python3`; KVM
 makes the boot a couple of minutes, without it QEMU emulates. The gate refuses
 an image whose `org.opencontainers.image.revision` label is not the commit it
 checked out, so a green run cannot describe a different build. What the gate

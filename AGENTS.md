@@ -132,7 +132,7 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 | `ASSETS.md` | Provenance and regeneration of the shipped art |
 | `docs/claims.md` | Every promise, the mechanism behind it and the check that proves it |
 | `scripts/boot-gate.sh` | Boots an image in QEMU, screenshots the login screen, runs the in-guest checks |
-| `scripts/boot-gate-checks.sh` | The checks that run inside the booted image, over SSH |
+| `scripts/boot-gate-checks.sh` | The checks that run inside the booted image, at boot |
 | `.github/workflows/boot-gate.yml` | Boots every image published on `main` |
 | `scripts/render-assets.py` | Renders the raster assets (`just assets`, needs Pillow) |
 | `tests/test_validate.py` | Unit tests for the checker itself (`just test-unit`) |

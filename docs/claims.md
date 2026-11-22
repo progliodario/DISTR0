@@ -65,9 +65,10 @@ just boot-gate ghcr.io/progliodario/distr0:latest "$(git rev-parse HEAD)"
 
 It pulls the image, installs it to a raw disk with the image's own
 `bootc install to-disk`, boots it with OVMF and QEMU's `-vga std`, waits for GDM,
-screenshots the framebuffer, and runs `scripts/boot-gate-checks.sh` over SSH as
-root, whose key the installer injects and whose sshd the gate enables on that
-disk only. The screenshot and the log are uploaded
+screenshots the framebuffer, and lets a oneshot unit run
+`scripts/boot-gate-checks.sh` at the end of the boot; the unit writes its log to
+the disk and powers the machine off, and the gate reads that log after
+shutdown. The screenshot and the log are uploaded
 with the run; a failure is annotated per check, so it is visible without the job
 log.
 
