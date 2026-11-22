@@ -119,9 +119,21 @@ def gdm_logo() -> Path:
         fill=(255, 255, 255, 255),
     )
 
-    word_font = font(46)
-    box = draw.textbbox((0, 0), "DISTR0", font=word_font)
-    draw.text((120, (height - (box[3] - box[1])) / 2 - box[1]), "DISTR0", font=word_font, fill=(255, 255, 255, 255))
+    # The largest size up to 46 px at which the name fits beside the badge: at a
+    # fixed 46 px DejaVu Sans Bold runs past the right edge and GDM showed
+    # "DISTR" with half a zero.
+    left, margin = 120, 6
+    for size in range(46, 19, -1):
+        word_font = font(size)
+        box = draw.textbbox((0, 0), "DISTR0", font=word_font)
+        if left + (box[2] - box[0]) <= width - margin:
+            break
+    draw.text(
+        (left - box[0], (height - (box[3] - box[1])) / 2 - box[1]),
+        "DISTR0",
+        font=word_font,
+        fill=(255, 255, 255, 255),
+    )
 
     out = PIXMAPS / "distr0-gdm-logo.png"
     image.save(out, optimize=True)
