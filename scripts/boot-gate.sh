@@ -371,8 +371,15 @@ guest_down() {
     local status=unknown line
     if [[ -n ${QEMU_PID} ]]; then
         set +e
-        wait "${QEMU_PID}" 2> /dev/null
-        status=$?
+        # QEMU may still be running (the SSH wait timed out, the guest is just
+        # silent). Waiting on it here blocked the gate until the job timeout.
+        if kill -0 "${QEMU_PID}" 2> /dev/null; then
+            stop_vm
+            status=143
+        else
+            wait "${QEMU_PID}" 2> /dev/null
+            status=$?
+        fi
         set -e
     fi
     printf 'FAIL  QEMU exit status: %s\n' "${status}"

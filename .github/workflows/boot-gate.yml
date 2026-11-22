@@ -89,7 +89,9 @@ jobs:
           # still running: a slow run then says where it stopped instead of
           # leaving the job timeout as the only clue.
           set +e
-          scripts/boot-gate.sh "${args[@]}" 2>&1 | while IFS= read -r line; do
+          # Even a bug in the wait loops must end the step while the report can
+          # still be annotated, rather than at the job timeout.
+          timeout 3000 scripts/boot-gate.sh "${args[@]}" 2>&1 | while IFS= read -r line; do
             printf '%s\n' "${line}" >> "${report}"
             case "${line}" in
               PHASE\ *) echo "::notice title=DISTR0 boot gate::${line#PHASE }" ;;
