@@ -5,7 +5,8 @@
 # can show that GDM reaches a login screen or that the desktop reads the files
 # this repository ships. This script installs the image to a raw disk with the
 # image's own installer, boots it, takes a screenshot of the framebuffer through
-# QMP, and runs scripts/boot-gate-checks.sh inside the guest at boot.
+# QMP once the greeter is up, and runs scripts/boot-gate-checks.sh inside the
+# guest at boot.
 #
 # Usage:
 #   scripts/boot-gate.sh --image ghcr.io/progliodario/distr0:latest \
@@ -15,14 +16,28 @@
 # The first form is what `.github/workflows/boot-gate.yml` runs: it pulls the
 # published image, refuses one whose OCI revision label is not the commit under
 # test, and installs the image to a raw disk with the image's own installer.
-# Needs podman with sudo for that, plus qemu and python3.
+# Needs podman with sudo for that, plus qemu and python3. The second form boots
+# a disk that already carries the in-guest checks (one this script installed).
 # KVM turns the boot into a couple of minutes; without it QEMU emulates, which
 # works but is slow.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PAINT_TIMEOUT=300
-POWEROFF_TIMEOUT=600
+
+# From QEMU starting to the guest's report being complete. With KVM a boot to
+# GDM takes a minute or two; emulation needs far longer.
+BOOT_TIMEOUT_KVM=900
+BOOT_TIMEOUT_TCG=3600
+# How long after the greeter is up the framebuffer may take to show it, and
+# how long to let the greeter's fade-in finish before the first screenshot.
+PAINT_TIMEOUT=180
+PAINT_SETTLE=15
+# The guest writes its report to this virtio-serial port, which QEMU saves to a
+# file of its own: the serial console also carries kernel and systemd output,
+# which could interleave with the report.
+GATE_PORT=org.distr0.gate
+GATE_DIR=/etc/distr0-boot-gate
+GATE_UNIT=distr0-boot-gate.service
 
 IMAGE=""
 DISK=""
@@ -30,6 +45,7 @@ WORKDIR=""
 EXPECT_REVISION=""
 REQUIRE_KVM=""
 QEMU_PID=""
+ACCEL=""
 SUDO=()
 
 say() { printf '%s\n' "$*"; }
@@ -43,7 +59,7 @@ die() {
 }
 
 usage() {
-    cat <<'EOF'
+    cat << 'EOF'
 Boot an image in QEMU and check the running system.
 
   --image REF            registry image to pull and install to a disk
@@ -59,56 +75,15 @@ need() {
     command -v "$1" > /dev/null 2>&1 || die "$1 is required but is not installed"
 }
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --image)
-            IMAGE="${2:?--image needs a value}"
-            shift 2
-            ;;
-        --disk)
-            DISK="${2:?--disk needs a value}"
-            shift 2
-            ;;
-        --expect-revision)
-            EXPECT_REVISION="${2:?--expect-revision needs a value}"
-            shift 2
-            ;;
-        --workdir)
-            WORKDIR="${2:?--workdir needs a value}"
-            shift 2
-            ;;
-        --require-kvm)
-            REQUIRE_KVM=1
-            shift
-            ;;
-        -h | --help)
-            usage
-            exit 0
-            ;;
-        *)
-            printf 'unknown argument: %s\n' "$1" >&2
-            usage >&2
-            exit 2
-            ;;
-    esac
-done
-
-[[ -n ${IMAGE} || -n ${DISK} ]] || die "one of --image or --disk is required"
-[[ -z ${IMAGE} || -z ${DISK} ]] || die "use --image or --disk, not both"
-[[ -z ${EXPECT_REVISION} || -n ${IMAGE} ]] || die "--expect-revision only applies to --image"
-
-WORKDIR="${WORKDIR:-$(mktemp -d "${TMPDIR:-/tmp}/distr0-boot-gate.XXXXXX")}"
-mkdir -p "${WORKDIR}"
-
-if [[ ${EUID} -ne 0 ]]; then
-    command -v sudo > /dev/null 2>&1 || die "sudo is required to install the disk"
-    SUDO=(sudo)
-fi
-
-need python3
-
-say "Workdir: ${WORKDIR}"
-say ""
+# The annotations are how a failure becomes readable: the job log needs
+# permissions the repository's own automation may not have.
+annotate_log() {
+    local prefix="$1" log="$2" line
+    tail -n 20 "${log}" 2> /dev/null | tr -d '\r' | while IFS= read -r line; do
+        [[ -n ${line} ]] && printf 'FAIL  %s: %s\n' "${prefix}" "${line}"
+    done
+    return 0
+}
 
 stop_vm() {
     if [[ -n ${QEMU_PID} ]] && kill -0 "${QEMU_PID}" 2> /dev/null; then
@@ -119,44 +94,37 @@ stop_vm() {
         done
         kill -9 "${QEMU_PID}" 2> /dev/null || true
     fi
+    if [[ -n ${QEMU_PID} ]]; then
+        wait "${QEMU_PID}" 2> /dev/null || true
+    fi
 }
 
 qemu_running() {
     [[ -n ${QEMU_PID} ]] && kill -0 "${QEMU_PID}" 2> /dev/null
 }
 
-trap stop_vm EXIT
+# --- Installing the disk ----------------------------------------------------
+
+# Registry hiccups are common enough on shared runners that a single pull
+# attempt should not decide whether the image gets booted, and the retry
+# output is what a failed annotation shows. A stalled connection hangs podman
+# pull forever, which no retry would reach; timeout makes a hung attempt a
+# failed attempt.
+pull_image() {
+    local ref="$1" log="$2" attempt output
+    for attempt in 1 2 3; do
+        if output="$(timeout 900 "${SUDO[@]}" podman pull "${ref}" 2>&1)"; then
+            printf '%s\n' "${output}" >> "${log}"
+            return 0
+        fi
+        printf 'pull attempt %d failed:\n%s\n' "${attempt}" "${output}" >> "${log}"
+        sleep 10
+    done
+    return 1
+}
 
 build_disk() {
     need podman
-
-    # The annotations are how this failure becomes readable: the job log needs
-    # permissions the repository's own automation may not have.
-    annotate_log() {
-        local prefix="$1" log="$2" line
-        tail -n 20 "${log}" | while IFS= read -r line; do
-            [[ -n ${line} ]] && printf 'FAIL  %s: %s\n' "${prefix}" "${line}"
-        done
-        return 0
-    }
-
-    # Registry hiccups are common enough on shared runners that a single pull
-    # attempt should not decide whether the image gets booted, and the retry
-    # output is what a failed annotation shows.
-    # A stalled connection hangs podman pull forever, which no retry would
-    # reach; timeout makes a hung attempt a failed attempt.
-    pull_image() {
-        local ref="$1" log="$2" attempt output
-        for attempt in 1 2 3; do
-            if output="$(timeout 900 "${SUDO[@]}" podman pull "${ref}" 2>&1)"; then
-                printf '%s\n' "${output}" >> "${log}"
-                return 0
-            fi
-            printf 'pull attempt %d failed:\n%s\n' "${attempt}" "${output}" >> "${log}"
-            sleep 10
-        done
-        return 1
-    }
 
     say "Pulling ${IMAGE}"
     if ! pull_image "${IMAGE}" "${WORKDIR}/pull.log"; then
@@ -184,164 +152,270 @@ build_disk() {
 
     mkdir -p "${WORKDIR}/output"
     local disk="${WORKDIR}/output/disk.raw"
+    rm -f "${disk}"
     truncate -s 20G "${disk}"
 
     # bootc's own installer writes the image to a disk in a couple of minutes,
     # where bootc-image-builder assembles the same disk for the better part of
-    # an hour. The checks are installed on the disk and run at boot.
+    # an hour. SELinux stays as users get it: the installer labels the tree
+    # from the image's own policy, which needs no SELinux on the host, while
+    # disabling SELinux at install time would add selinux=0 and boot a system
+    # nobody runs.
     say "Installing ${IMAGE} to ${disk} with bootc install to-disk"
     phase "installing the image with bootc install to-disk"
     if ! timeout 1800 "${SUDO[@]}" podman run --rm --privileged --pid=host --ipc=host \
-        --pull=missing "${selinux[@]}" \
+        --pull=never "${selinux[@]}" \
         -v /dev:/dev \
         -v "${WORKDIR}/output:/output" \
         -v /var/lib/containers:/var/lib/containers \
         "${IMAGE}" bootc install to-disk --via-loopback --filesystem btrfs \
-        --disable-selinux --karg=console=ttyS0,115200n8 \
+        --karg=console=tty0 --karg=console=ttyS0,115200n8 \
         --skip-fetch-check /output/disk.raw \
         > "${WORKDIR}/install.log" 2>&1; then
         annotate_log "bootc install" "${WORKDIR}/install.log"
         die "bootc install failed, see ${WORKDIR}/install.log"
     fi
     "${SUDO[@]}" chown -R "$(id -u):$(id -g)" "${WORKDIR}/output"
+    [[ -s ${disk} ]] || die "bootc install produced no disk at ${disk}"
     phase "installed the disk"
 
     install_guest_checks "${disk}"
     DISK="${disk}"
-    [[ -s ${DISK} ]] || die "bootc install produced no disk at ${DISK}"
 }
 
-# Mount the root filesystem of the fresh disk. bootc lays it out as a btrfs
-# subvolume, and composefs keeps /usr in an EROFS image rather than in the
-# directory the host sees, so neither is assumed here.
+# Find the ostree deployment on the fresh disk. bootc writes a *physical* root:
+# the root partition holds only boot/ and ostree/, and the system's /etc is the
+# deployment's, ostree/deploy/<stateroot>/deploy/<checksum>.<serial>/etc. That
+# directory is bind-mounted as /etc at boot, so a file written there before the
+# first boot is part of the running system.
 ROOT_MOUNT=""
 ROOT_LOOP=""
+DEPLOYMENT=""
 
-mount_installed_root() {
-    local disk="$1" part fstype opts_list=() opt attempt layout last_err=""
+find_deployment() {
+    local root="$1"
+    # shellcheck disable=SC2016  # expanded by the inner shell, which runs as root
+    "${SUDO[@]}" bash -c '
+        shopt -s nullglob
+        for etc in "$1"/ostree/deploy/*/deploy/*/etc "$1"/*/ostree/deploy/*/deploy/*/etc; do
+            [[ -d ${etc} ]] && printf "%s\n" "${etc%/etc}"
+        done
+    ' _ "${root}"
+}
+
+mount_deployment() {
+    local disk="$1" part fstype layout last_err="none" deployments=() found=""
     ROOT_MOUNT="$(mktemp -d)"
     ROOT_LOOP="$("${SUDO[@]}" losetup --find --show --partscan "${disk}")"
     "${SUDO[@]}" partprobe "${ROOT_LOOP}" 2> /dev/null || true
     "${SUDO[@]}" udevadm settle 2> /dev/null || true
-    for attempt in $(seq 1 10); do
-        [[ -n "$(ls -A "${ROOT_LOOP}"p* 2> /dev/null)" ]] && break
+    for _ in $(seq 1 10); do
+        compgen -G "${ROOT_LOOP}p*" > /dev/null && break
         sleep 1
     done
     layout="$("${SUDO[@]}" lsblk -rno NAME,FSTYPE,SIZE "${ROOT_LOOP}" 2> /dev/null | tr '\n' ' ')"
     phase "disk partitions: ${layout:-none}"
-    # Mount each candidate as each root filesystem type instead of trusting
-    # lsblk/blkid: their FSTYPE comes from udev, and a fresh loop device in a
-    # container has not always been probed yet (which left every FSTYPE empty
-    # and made the gate skip every partition). The root is the one with /etc.
-    for fstype in btrfs xfs ext4; do
-        for part in "${ROOT_LOOP}"p*; do
-            [[ -b ${part} ]] || continue
-            opts_list=("rw")
-            [[ ${fstype} == btrfs ]] && opts_list=("rw,subvol=root" "rw")
-            for opt in "${opts_list[@]}"; do
-                last_err="$("${SUDO[@]}" mount -t "${fstype}" -o "${opt}" "${part}" "${ROOT_MOUNT}" 2>&1)" || continue
-                if [[ -d ${ROOT_MOUNT}/etc ]]; then
-                    return 0
+
+    # `-t auto` has mount(8) probe the superblock itself; lsblk's FSTYPE comes
+    # from udev, which has not always seen a fresh loop device yet. The explicit
+    # types are the fallback for a mount(8) that cannot probe. The ESP mounts
+    # too, but holds no deployment, so it is skipped.
+    for part in "${ROOT_LOOP}"p*; do
+        [[ -b ${part} ]] || continue
+        for fstype in auto btrfs xfs ext4; do
+            if last_err="$("${SUDO[@]}" mount -t "${fstype}" "${part}" "${ROOT_MOUNT}" 2>&1)"; then
+                mapfile -t deployments < <(find_deployment "${ROOT_MOUNT}")
+                if [[ ${#deployments[@]} -gt 0 ]]; then
+                    found="${part}"
+                    break 2
                 fi
+                last_err="$(basename "${part}") mounted but holds no ostree deployment"
                 "${SUDO[@]}" umount "${ROOT_MOUNT}"
-            done
+                break
+            fi
         done
     done
-    die "could not mount the installed root (partitions: ${layout:-none}; last error: ${last_err:-none})"
+    if [[ -z ${found} ]]; then
+        "${SUDO[@]}" losetup -d "${ROOT_LOOP}" || true
+        die "found no ostree deployment on the disk (partitions: ${layout:-none}; last error: ${last_err})"
+    fi
+    if [[ ${#deployments[@]} -ne 1 ]]; then
+        umount_deployment
+        die "expected one ostree deployment on a fresh disk, found ${#deployments[@]}: ${deployments[*]}"
+    fi
+    DEPLOYMENT="${deployments[0]}"
+    say "Deployment: ${DEPLOYMENT#"${ROOT_MOUNT}"/} on $(basename "${found}")"
 }
 
-umount_installed_root() {
-    "${SUDO[@]}" umount "${ROOT_MOUNT}"
+umount_deployment() {
+    sync
+    "${SUDO[@]}" umount "${ROOT_MOUNT}" || true
     "${SUDO[@]}" losetup -d "${ROOT_LOOP}" || true
     rmdir "${ROOT_MOUNT}" 2> /dev/null || true
     ROOT_MOUNT=""
+    DEPLOYMENT=""
 }
 
-# The checks run inside the booted system, started by a oneshot unit after the
-# display manager: SSH needs sshd (which this image does not enable) and the
-# guest's own boot is the thing under test. The unit prints its report on the
-# serial console, which QEMU captures, so no filesystem of the installed system
-# has to be writable or readable afterwards. One sleep gives the gate time to
-# capture the login screen before the unit powers the machine off.
-install_guest_checks() {
-    local disk="$1" root
+# Give a file the SELinux label of a file the image shipped, so an enforcing
+# guest treats it like its neighbours. The host needs no SELinux for this:
+# security.selinux is an ordinary extended attribute on disk.
+copy_label() {
+    local reference="$1" target="$2"
+    "${SUDO[@]}" python3 - "${reference}" "${target}" << 'PY'
+import os
+import sys
+
+reference, target = sys.argv[1], sys.argv[2]
+try:
+    label = os.getxattr(reference, "security.selinux", follow_symlinks=False)
+except OSError:
+    raise SystemExit(0)  # an unlabelled tree: nothing to match
+os.setxattr(target, "security.selinux", label, follow_symlinks=False)
+PY
+}
+
+image_hash() {
+    local path="${REPO_ROOT}/system_files/${1#/}"
+    [[ -f ${path} ]] || die "the repository does not contain ${path}"
+    sha256sum "${path}" | cut -d' ' -f1
+}
+
+# Write the in-guest checks into a deployment: a oneshot unit, started after the
+# display manager, that waits for the greeter, tells the host to take the
+# screenshot, runs scripts/boot-gate-checks.sh and writes its report to the
+# gate's virtio-serial port. The host stops the machine once it has both, so
+# nothing on the guest has to time a shutdown, and nothing depends on sshd,
+# which this image does not enable.
+write_guest_checks() {
+    local deployment="$1" etc="$1/etc" dir unit wants
     local logo light banner hook
     logo="$(image_hash /usr/share/pixmaps/distr0-gdm-logo.png)"
     light="$(image_hash /usr/share/backgrounds/distr0/distr0-wallpaper-light.png)"
     banner="$(image_hash /usr/share/distr0/banner.sh)"
     hook="$(image_hash /etc/profile.d/zz-distr0-banner.sh)"
 
-    mount_installed_root "${disk}"
-    root="${ROOT_MOUNT}"
-    "${SUDO[@]}" cp "${REPO_ROOT}/scripts/boot-gate-checks.sh" \
-        "${root}/etc/distr0-boot-gate-checks-body.sh"
-    "${SUDO[@]}" tee "${root}/etc/distr0-boot-gate-checks.sh" > /dev/null <<EOF
-#!/bin/bash
-exec > /dev/ttyS0 2>&1
+    dir="${etc}${GATE_DIR#/etc}"
+    unit="${etc}/systemd/system/${GATE_UNIT}"
+    wants="${etc}/systemd/system/graphical.target.wants"
+    [[ -d ${etc}/systemd/system ]] || die "the deployment at ${deployment} has no /etc/systemd/system"
+
+    "${SUDO[@]}" install -d -m 0755 "${dir}" "${wants}"
+    "${SUDO[@]}" install -m 0755 "${REPO_ROOT}/scripts/boot-gate-checks.sh" "${dir}/checks.sh"
+    "${SUDO[@]}" tee "${dir}/run.sh" > /dev/null << EOF
+#!/usr/bin/bash
+# Written by scripts/boot-gate.sh for one boot gate run; not part of the image.
+
+# The port's device node is /dev/vportNpM; /sys says which one is ours, so this
+# does not depend on the udev rule that adds /dev/virtio-ports/ symlinks.
+port=""
+for _ in \$(seq 1 60); do
+    for name in /sys/class/virtio-ports/*/name; do
+        if [[ -r \${name} && "\$(cat "\${name}")" == ${GATE_PORT} ]]; then
+            port="/dev/\$(basename "\$(dirname "\${name}")")"
+        fi
+    done
+    [[ -n \${port} && -w \${port} ]] && break
+    sleep 1
+done
+exec > "\${port:-/dev/ttyS0}" 2>&1
+
 echo "DISTR0-BOOT-GATE-BEGIN"
-sleep 45
+greeter_up() {
+    local id
+    pgrep -x gnome-shell > /dev/null || return 1
+    for id in \$(loginctl list-sessions --no-legend 2> /dev/null | awk '{print \$1}'); do
+        [[ "\$(loginctl show-session "\${id}" -p Class --value 2> /dev/null)" == greeter ]] && return 0
+    done
+    return 1
+}
+state=timeout
+for _ in \$(seq 1 300); do
+    if greeter_up; then
+        state=up
+        break
+    fi
+    sleep 1
+done
+# The host takes the screenshot once it reads this line.
+echo "DISTR0-BOOT-GATE-GREETER \${state}"
+
 export EXPECT_GDM_LOGO_SHA256=${logo}
 export EXPECT_LIGHT_WALLPAPER_SHA256=${light}
 export EXPECT_BANNER_SHA256=${banner}
 export EXPECT_BANNER_HOOK_SHA256=${hook}
-bash /etc/distr0-boot-gate-checks-body.sh
+bash ${GATE_DIR}/checks.sh
 echo "EXIT=\$?"
 echo "DISTR0-BOOT-GATE-END"
-sync
-poweroff -f
 EOF
-    # systemd executes the wrapper directly, and tee creates it 0644.
-    "${SUDO[@]}" chmod 0755 "${root}/etc/distr0-boot-gate-checks.sh"
-    "${SUDO[@]}" tee "${root}/etc/systemd/system/distr0-boot-gate-checks.service" > /dev/null <<'EOF'
+    "${SUDO[@]}" chmod 0755 "${dir}/run.sh"
+    "${SUDO[@]}" tee "${unit}" > /dev/null << EOF
 [Unit]
 Description=DISTR0 boot gate checks
-After=display-manager.service
+After=display-manager.service systemd-user-sessions.service
+
 [Service]
 Type=oneshot
-ExecStart=/etc/distr0-boot-gate-checks.sh
-TimeoutStartSec=300
+ExecStart=/usr/bin/bash ${GATE_DIR}/run.sh
+TimeoutStartSec=900
+
 [Install]
 WantedBy=graphical.target
 EOF
-    "${SUDO[@]}" mkdir -p "${root}/etc/systemd/system/graphical.target.wants"
-    "${SUDO[@]}" ln -sf /etc/systemd/system/distr0-boot-gate-checks.service \
-        "${root}/etc/systemd/system/graphical.target.wants/distr0-boot-gate-checks.service"
-    umount_installed_root
+    "${SUDO[@]}" ln -sfn "../${GATE_UNIT}" "${wants}/${GATE_UNIT}"
+
+    # The labels of what the image itself ships next to these files.
+    copy_label "${etc}/profile.d" "${dir}"
+    copy_label "${etc}/profile.d/zz-distr0-banner.sh" "${dir}/run.sh"
+    copy_label "${etc}/profile.d/zz-distr0-banner.sh" "${dir}/checks.sh"
+    copy_label "$(find_reference "${etc}/systemd/system" -maxdepth 1 -type f)" "${unit}"
+    copy_label "$(find_reference "${etc}/systemd/system" -mindepth 2 -maxdepth 2 -type l)" \
+        "${wants}/${GATE_UNIT}"
+
+    show_login_screen "${etc}"
+}
+
+# The installer leaves user creation to gnome-initial-setup, so on a disk with
+# no account GDM runs the first-boot assistant instead of the login screen. Every
+# later boot shows the login screen, which is what the wordmark promise is about
+# and what the gate photographs: switch the assistant off on this disk only. The
+# file is rewritten in place, so it keeps the SELinux label the image gave it.
+show_login_screen() {
+    local etc="$1" conf="$1/gdm/custom.conf" content=""
+    if "${SUDO[@]}" test -f "${conf}"; then
+        content="$("${SUDO[@]}" cat "${conf}")"
+    else
+        "${SUDO[@]}" install -d -m 0755 "${etc}/gdm"
+        "${SUDO[@]}" touch "${conf}"
+        copy_label "${etc}/gdm" "${conf}"
+    fi
+    if grep -q '^InitialSetupEnable=' <<< "${content}"; then
+        # shellcheck disable=SC2001  # a per-line anchor, which ${//} cannot express
+        content="$(sed 's/^InitialSetupEnable=.*/InitialSetupEnable=False/' <<< "${content}")"
+    elif grep -q '^\[daemon\]' <<< "${content}"; then
+        content="$(sed '/^\[daemon\]/a InitialSetupEnable=False' <<< "${content}")"
+    else
+        content="$(printf '%s\n[daemon]\nInitialSetupEnable=False' "${content}")"
+    fi
+    printf '%s\n' "${content}" | "${SUDO[@]}" tee "${conf}" > /dev/null
+}
+
+# A file of the given kind that the image ships under DIR carries the label such
+# a file must have there; DIR's own label is the fallback.
+find_reference() {
+    local dir="$1" reference
+    shift
+    reference="$("${SUDO[@]}" find "${dir}" "$@" ! -name "${GATE_UNIT}" -print -quit 2> /dev/null || true)"
+    printf '%s\n' "${reference:-${dir}}"
+}
+
+install_guest_checks() {
+    mount_deployment "$1"
+    write_guest_checks "${DEPLOYMENT}"
+    umount_deployment
     phase "installed the in-guest checks"
 }
 
-wait_for_vm_exit() {
-    local deadline=$((SECONDS + POWEROFF_TIMEOUT))
-    while kill -0 "${QEMU_PID}" 2> /dev/null; do
-        if ((SECONDS >= deadline)); then
-            phase "the guest did not power off within ${POWEROFF_TIMEOUT}s"
-            guest_down
-            die "the guest did not finish the in-guest checks"
-        fi
-        sleep 5
-    done
-    wait "${QEMU_PID}" 2> /dev/null || true
-}
-
-# The report is on the serial console QEMU captured while the machine ran; a
-# missing report is itself a failure, and the tail of the console says why.
-read_guest_log() {
-    local console="${WORKDIR}/console.log" log="${WORKDIR}/guest-checks.log"
-    if [[ -f ${console} ]]; then
-        # A serial console writes CRLF; the markers are matched without CR.
-        tr -d '\r' < "${console}" \
-            | sed -n '/^DISTR0-BOOT-GATE-BEGIN$/,/^DISTR0-BOOT-GATE-END$/p' > "${log}"
-    fi
-    if [[ ! -s ${log} ]]; then
-        say "FAIL  the guest left no check report on the serial console"
-        tail -n 8 "${console}" 2> /dev/null | while IFS= read -r line; do
-            [[ -n ${line} ]] && printf 'FAIL  guest console: %s\n' "${line}"
-        done
-        return 1
-    fi
-    cat "${log}"
-    grep -q '^EXIT=0$' "${log}"
-}
+# --- Booting ----------------------------------------------------------------
 
 # qcow2 files start with "QFI\xfb"; anything else is a raw disk.
 disk_format() {
@@ -355,11 +429,11 @@ disk_format() {
 boot_vm() {
     need qemu-system-x86_64
 
-    local accel=tcg cpu=max code="" vars="" pflash=()
-    local format
+    local cpu=max code="" vars="" pflash=() format base
     format="$(disk_format "${DISK}")"
+    ACCEL=tcg
     if [[ -w /dev/kvm ]]; then
-        accel=kvm
+        ACCEL=kvm
         cpu=host
     elif [[ -n ${REQUIRE_KVM} ]]; then
         # A GNOME desktop under TCG needs far longer than the boot budget, so a
@@ -386,6 +460,9 @@ boot_vm() {
         say "No OVMF firmware found: booting with QEMU's default firmware."
     fi
 
+    : > "${WORKDIR}/guest-report.log"
+    : > "${WORKDIR}/console.log"
+
     # -vga std is the one display device QEMU can always screenshot through QMP;
     # GNOME falls back to llvmpipe, which is all a login screen needs.
     #
@@ -393,7 +470,7 @@ boot_vm() {
     # dies, wait gives the exit status (137 is the OOM killer) and qemu.log has
     # the reason, which is what the gate has to report.
     qemu-system-x86_64 \
-        -machine "q35,accel=${accel}" \
+        -machine "q35,accel=${ACCEL}" \
         -cpu "${cpu}" \
         -m 4096 -smp 2 \
         -drive "file=${DISK},if=virtio,format=${format}" \
@@ -401,48 +478,41 @@ boot_vm() {
         -vga std \
         -display none \
         -nic "user,model=virtio-net-pci" \
+        -device virtio-serial-pci,id=gate-serial \
+        -chardev "file,id=gate,path=${WORKDIR}/guest-report.log" \
+        -device "virtserialport,bus=gate-serial.0,chardev=gate,name=${GATE_PORT}" \
         -qmp "unix:${WORKDIR}/qmp.sock,server=on,wait=off" \
         -serial "file:${WORKDIR}/console.log" \
         > "${WORKDIR}/qemu.log" 2>&1 &
 
     QEMU_PID=$!
-    say "Booting ${DISK} (${format}, ${accel})"
-    phase "booting the disk (${accel})"
+    say "Booting ${DISK} (${format}, ${ACCEL})"
+    phase "booting the disk (${ACCEL})"
 }
 
 guest_down() {
-    local status=unknown line
-    if [[ -n ${QEMU_PID} ]]; then
-        set +e
-        # QEMU may still be running (the guest is just silent). Waiting on it
-        # here blocked the gate until the job timeout.
-        if kill -0 "${QEMU_PID}" 2> /dev/null; then
-            stop_vm
-            status=143
-        else
-            wait "${QEMU_PID}" 2> /dev/null
-            status=$?
-        fi
-        set -e
-    fi
-    printf 'FAIL  QEMU exit status: %s\n' "${status}"
-    tail -n 3 "${WORKDIR}/qemu.log" 2> /dev/null | while IFS= read -r line; do
-        [[ -n ${line} ]] && printf 'FAIL  qemu: %s\n' "${line}"
-    done
-    tail -n 3 "${WORKDIR}/console.log" 2> /dev/null | while IFS= read -r line; do
+    local status line
+    set +e
+    wait "${QEMU_PID}" 2> /dev/null
+    status=$?
+    set -e
+    printf 'FAIL  QEMU exited early with status %s\n' "${status}"
+    annotate_log qemu "${WORKDIR}/qemu.log"
+    tail -n 8 "${WORKDIR}/console.log" 2> /dev/null | tr -d '\r' | while IFS= read -r line; do
         [[ -n ${line} ]] && printf 'FAIL  guest console: %s\n' "${line}"
     done
     return 0
 }
 
 screendump() {
-    python3 - "${WORKDIR}/qmp.sock" "${WORKDIR}/login-screen.ppm" <<'PY'
+    python3 - "${WORKDIR}/qmp.sock" "${WORKDIR}/login-screen.ppm" << 'PY'
 import json
 import socket
 import sys
 
 sock_path, out = sys.argv[1], sys.argv[2]
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.settimeout(30)
 sock.connect(sock_path)
 stream = sock.makefile("rwb")
 
@@ -471,51 +541,173 @@ PY
 }
 
 analyse_screen() {
-    python3 "${REPO_ROOT}/scripts/screen-stats.py" "${WORKDIR}/login-screen.ppm"
+    python3 "${REPO_ROOT}/scripts/screen-stats.py" "${WORKDIR}/login-screen.ppm" \
+        --png "${WORKDIR}/login-screen.png"
 }
 
-wait_for_paint() {
-    local deadline=$((SECONDS + PAINT_TIMEOUT)) detail="no screenshot yet"
-    while ((SECONDS < deadline)); do
-        if screendump > "${WORKDIR}/qmp.log" 2>&1 && detail="$(analyse_screen 2>&1)"; then
-            say "ok    the login screen painted (${detail})"
-            phase "the login screen painted"
+# The report as the guest wrote it: on the gate's port, or on the serial console
+# when the port never appeared in the guest.
+report_text() {
+    local source
+    for source in "${WORKDIR}/guest-report.log" "${WORKDIR}/console.log"; do
+        if tr -d '\r' < "${source}" 2> /dev/null | grep -q '^DISTR0-BOOT-GATE-BEGIN$'; then
+            tr -d '\r' < "${source}"
             return 0
         fi
-        sleep 5
     done
-    say "FAIL  the login screen never painted a recognisable desktop (${detail})"
     return 1
 }
 
-image_hash() {
-    local path="${REPO_ROOT}/system_files/${1#/}"
-    [[ -f ${path} ]] || die "the repository does not contain ${path}"
-    sha256sum "${path}" | cut -d' ' -f1
+report_has() {
+    report_text | grep -q "$1"
 }
 
-if [[ -n ${IMAGE} ]]; then
-    build_disk
+# Wait for the guest: the greeter marker starts the screenshot attempts, the end
+# marker closes the report. One deadline bounds the whole boot, and a QEMU that
+# dies ends the wait at once instead of at the deadline.
+PAINTED=0
+wait_for_guest() {
+    local timeout=${BOOT_TIMEOUT_KVM} deadline paint_deadline=0 paint_start=0 greeter=0 finished=0
+    local detail="the guest never reported the greeter" started=${SECONDS}
+    [[ ${ACCEL} == kvm ]] || timeout=${BOOT_TIMEOUT_TCG}
+    deadline=$((SECONDS + timeout))
+
+    while ((SECONDS < deadline)); do
+        if ! qemu_running; then
+            guest_down
+            return 1
+        fi
+        if ((greeter == 0)) && report_has '^DISTR0-BOOT-GATE-GREETER'; then
+            greeter=1
+            paint_start=$((SECONDS + PAINT_SETTLE))
+            paint_deadline=$((SECONDS + PAINT_TIMEOUT))
+            detail="no screenshot yet"
+            phase "the guest reported the greeter after $((SECONDS - started))s"
+        fi
+        if ((greeter == 1 && PAINTED == 0 && SECONDS >= paint_start && SECONDS < paint_deadline)); then
+            if screendump > "${WORKDIR}/qmp.log" 2>&1 && detail="$(analyse_screen 2>&1)"; then
+                PAINTED=1
+                say "ok    the login screen painted (${detail})"
+                phase "the login screen painted"
+            fi
+        fi
+        if ((finished == 0)) && report_has '^DISTR0-BOOT-GATE-END$'; then
+            finished=1
+            phase "the guest finished its checks after $((SECONDS - started))s"
+        fi
+        if ((finished == 1 && (PAINTED == 1 || SECONDS >= paint_deadline))); then
+            break
+        fi
+        sleep 5
+    done
+
+    if ((PAINTED == 0)); then
+        # Keep whatever the screen shows: it is the clue to why it never painted.
+        if screendump > "${WORKDIR}/qmp.log" 2>&1; then
+            detail="$(analyse_screen 2>&1 || true)"
+        fi
+        say "FAIL  the login screen never painted a recognisable desktop (${detail})"
+    fi
+    if ((finished == 0)); then
+        phase "the guest did not finish its checks within ${timeout}s"
+        say "FAIL  the guest did not finish the in-guest checks within ${timeout}s"
+        annotate_log "guest console" "${WORKDIR}/console.log"
+    fi
+    stop_vm
+    ((finished == 1))
+}
+
+# The report is the text between the markers on the gate's port; a missing
+# report is itself a failure, and the tail of the console says why.
+read_guest_log() {
+    local log="${WORKDIR}/guest-checks.log"
+    { report_text || true; } \
+        | sed -n '/^DISTR0-BOOT-GATE-BEGIN$/,/^DISTR0-BOOT-GATE-END$/p' > "${log}"
+    if ! grep -q '^DISTR0-BOOT-GATE-BEGIN$' "${log}" 2> /dev/null; then
+        say "FAIL  the guest left no check report on the ${GATE_PORT} port"
+        return 1
+    fi
+    grep -v '^DISTR0-BOOT-GATE-' "${log}" || true
+    grep -q '^EXIT=0$' "${log}"
+}
+
+main() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --image)
+                IMAGE="${2:?--image needs a value}"
+                shift 2
+                ;;
+            --disk)
+                DISK="${2:?--disk needs a value}"
+                shift 2
+                ;;
+            --expect-revision)
+                EXPECT_REVISION="${2:?--expect-revision needs a value}"
+                shift 2
+                ;;
+            --workdir)
+                WORKDIR="${2:?--workdir needs a value}"
+                shift 2
+                ;;
+            --require-kvm)
+                REQUIRE_KVM=1
+                shift
+                ;;
+            -h | --help)
+                usage
+                exit 0
+                ;;
+            *)
+                printf 'unknown argument: %s\n' "$1" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
+
+    [[ -n ${IMAGE} || -n ${DISK} ]] || die "one of --image or --disk is required"
+    [[ -z ${IMAGE} || -z ${DISK} ]] || die "use --image or --disk, not both"
+    [[ -z ${EXPECT_REVISION} || -n ${IMAGE} ]] || die "--expect-revision only applies to --image"
+
+    WORKDIR="${WORKDIR:-$(mktemp -d "${TMPDIR:-/tmp}/distr0-boot-gate.XXXXXX")}"
+    mkdir -p "${WORKDIR}"
+    WORKDIR="$(cd "${WORKDIR}" && pwd)"
+
+    if [[ ${EUID} -ne 0 ]]; then
+        command -v sudo > /dev/null 2>&1 || die "sudo is required to install the disk"
+        SUDO=(sudo)
+    fi
+
+    need python3
+
+    say "Workdir: ${WORKDIR}"
+    say ""
+
+    trap stop_vm EXIT
+
+    if [[ -n ${IMAGE} ]]; then
+        build_disk
+    fi
+    [[ -f ${DISK} ]] || die "no disk image at ${DISK}"
+
+    boot_vm
+
+    local guest_ok=0 checks_ok=0
+    wait_for_guest && guest_ok=1
+    read_guest_log && checks_ok=1
+
+    say ""
+    if ((PAINTED == 1 && guest_ok == 1 && checks_ok == 1)); then
+        say "boot gate passed: the image booted, reached the login screen, and serves the files this commit ships."
+        return 0
+    fi
+    say "boot gate failed; the log, the report and the screenshot are in ${WORKDIR}"
+    return 1
+}
+
+# Sourcing the script gives the functions without running the gate, which is
+# how the repository's tests and a manual debugging session reuse them.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    main "$@"
 fi
-
-[[ -f ${DISK} ]] || die "no disk image at ${DISK}"
-
-boot_vm
-
-paint_failures=0
-wait_for_paint || paint_failures=1
-
-wait_for_vm_exit
-
-set +e
-read_guest_log
-guest_failures=$?
-set -e
-
-failures=$((paint_failures + guest_failures))
-say ""
-if ((failures > 0)); then
-    say "boot gate failed: ${failures} check(s) failed; log and screenshot in ${WORKDIR}"
-    exit 1
-fi
-say "boot gate passed: the image booted, reached the login screen, and serves the files this commit ships."

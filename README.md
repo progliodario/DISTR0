@@ -124,7 +124,8 @@ verifies against, so a Rekor outage cannot block a release.
 A container build cannot show GDM starting or the desktop reading a dconf
 database: that needs a systemd boot. `.github/workflows/boot-gate.yml` runs
 after every successful build on `main`, pulls the image that was just published,
-installs it to a raw disk with `bootc install to-disk` and boots it in QEMU. It waits for the
+installs it to a raw disk with `bootc install to-disk` (SELinux enforcing, as
+installed) and boots it in QEMU. It waits for the
 greeter, screenshots the framebuffer through QMP, and runs
 `scripts/boot-gate-checks.sh` inside the guest at boot. Those checks compare the
 running system with the commit under test: the GDM wordmark and the light

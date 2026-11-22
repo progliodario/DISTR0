@@ -52,6 +52,9 @@ by this repository, and the README must not imply otherwise:
 - an actual Anaconda installation from the ISO;
 - a user logging into a GNOME session: the gate reads the compiled desktop
   defaults through dconf, it does not watch a session apply them;
+- `gnome-initial-setup`: the installer leaves account creation to it, so a real
+  first boot opens the first-boot assistant. The gate switches it off on its own
+  disk to photograph the login screen every later boot shows;
 - suspend, resume, external displays and anything that needs a physical machine.
 
 ## How the gate runs
@@ -63,15 +66,21 @@ just boot-gate
 just boot-gate ghcr.io/progliodario/distr0:latest "$(git rev-parse HEAD)"
 ```
 
-It pulls the image, installs it to a raw disk with the image's own
-`bootc install to-disk`, boots it with OVMF and QEMU's `-vga std`, waits for GDM,
-screenshots the framebuffer, and lets a oneshot unit run
-`scripts/boot-gate-checks.sh` at the end of the boot; the unit prints its report
-on the serial console and powers the machine off, and the gate reads that
-report from the console log QEMU captured. The screenshot and the report are
-uploaded
-with the run; a failure is annotated per check, so it is visible without the job
-log.
+It pulls the image and installs it to a raw disk with the image's own
+`bootc install to-disk`, with SELinux enforcing as on an installed machine. A
+bootc disk's root partition holds only `boot/` and `ostree/`; the system's
+`/etc` is the deployment's, `ostree/deploy/<stateroot>/deploy/<checksum>.0/etc`,
+and that is where the gate adds a oneshot unit that runs
+`scripts/boot-gate-checks.sh` after the display manager. It also turns off
+`gnome-initial-setup` on that disk, so GDM shows the login screen rather than
+the first-boot assistant. Nothing else on the disk changes.
+
+The gate boots the disk with OVMF and QEMU's `-vga std`. When the guest sees a
+greeter session it says so on a dedicated virtio-serial port, the gate
+screenshots the framebuffer through QMP, and the unit writes the check report to
+the same port; the gate stops the machine once it has both. The screenshot (PPM
+and PNG), the report and the console log are uploaded with the run; a failure is
+annotated per check, so it is visible without the job log.
 
 The gate compares the running system with the commit it checked out: it refuses
 an image whose `org.opencontainers.image.revision` label is another commit, and
