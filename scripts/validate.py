@@ -493,7 +493,18 @@ def check_boot_gate() -> None:
         )
         check(
             "the gate waits for the login screen",
-            "wait_for_paint" in text and "screendump" in text,
+            "DISTR0-BOOT-GATE-GREETER" in text and "screendump" in text,
+            "the screenshot is taken once the guest reports the greeter",
+        )
+        check(
+            "the gate writes its checks into the ostree deployment",
+            "ostree/deploy/" in text,
+            "the root partition of a bootc disk has no /etc of its own",
+        )
+        check(
+            "the gate boots with SELinux as users get it",
+            "--disable-selinux" not in text,
+            "--disable-selinux adds selinux=0 to the kernel command line",
         )
         check("the gate screenshots the framebuffer", "screendump" in text)
         check("the gate runs the in-guest checks", "scripts/boot-gate-checks.sh" in text)

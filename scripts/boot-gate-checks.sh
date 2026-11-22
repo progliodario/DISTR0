@@ -46,6 +46,18 @@ wait_for_file() {
     return 1
 }
 
+# Retry a predicate for up to $1 seconds: the checks start right after GDM, and
+# the greeter session appears a few seconds later.
+eventually() {
+    local seconds="$1" _
+    shift
+    for _ in $(seq 1 "${seconds}"); do
+        "$@" && return 0
+        sleep 1
+    done
+    "$@"
+}
+
 hash_is() {
     local path="$1" expected="$2"
     [[ -r ${path} ]] || return 1
@@ -81,9 +93,20 @@ is_distr0() { [[ ${image_id} == distr0 && -n ${image_version} ]]; }
 check "the running system is DISTR0 with an image version" is_distr0
 
 # --- The login screen -------------------------------------------------------
+# GDM 49 and later run the greeter as a dynamic `gdm-greeter` user, not as
+# `gdm`, so the greeter is recognised by its logind session class instead of
+# by the name of the user that owns gnome-shell.
+greeter_session() {
+    local id
+    for id in $(loginctl list-sessions --no-legend 2> /dev/null | awk '{print $1}'); do
+        [[ "$(loginctl show-session "${id}" -p Class --value 2> /dev/null)" == greeter ]] && return 0
+    done
+    return 1
+}
+greeter_shell() { greeter_session && pgrep -x gnome-shell > /dev/null; }
+
 check "GDM is active" systemctl is-active --quiet gdm.service
-check "GDM runs a greeter session" pgrep -u gdm -x gnome-shell
-check "the gate can allocate a pty for an interactive shell" have script
+check "GDM runs a greeter session" eventually 120 greeter_shell
 check "dconf is available" have dconf
 
 # --- Shipped identity, by content and by what the desktop reads -------------
@@ -108,10 +131,14 @@ check "the greeting text is the shipped file" \
 check "the login hook is the shipped file" \
     hash_is "${root}/etc/profile.d/zz-distr0-banner.sh" "${EXPECT_BANNER_HOOK_SHA256:?}"
 
-interactive="$(script -qec 'bash -l -i -c true' /dev/null 2>&1 || true)"
-noninteractive="$(bash -l -c true 2>&1 || true)"
-quiet="$(DISTR0_NO_BANNER=1 script -qec 'bash -l -i -c true' /dev/null 2>&1 || true)"
-twice="$(script -qec 'bash -l -i -c ". /etc/profile.d/zz-distr0-banner.sh; . /etc/profile.d/zz-distr0-banner.sh"' /dev/null 2>&1 || true)"
+# `bash -i` is interactive without a terminal, which is all the hook tests
+# ($- contains i). The image does not ship script(1) (util-linux-script), so a
+# pty is neither available nor needed. stdin is /dev/null so nothing a profile
+# script runs can wait for input.
+interactive="$(bash -l -i -c true 2>&1 < /dev/null || true)"
+noninteractive="$(bash -l -c true 2>&1 < /dev/null || true)"
+quiet="$(DISTR0_NO_BANNER=1 bash -l -i -c true 2>&1 < /dev/null || true)"
+twice="$(bash -l -i -c '. /etc/profile.d/zz-distr0-banner.sh; . /etc/profile.d/zz-distr0-banner.sh' 2>&1 < /dev/null || true)"
 
 banner_shows() { grep -q 'ujust distr0-update' <<< "${interactive}"; }
 banner_is_silent() { ! grep -q 'ujust distr0-update' <<< "${noninteractive}"; }

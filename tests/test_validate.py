@@ -146,6 +146,88 @@ def test_screen_stats_tell_a_desktop_from_a_black_frame(tmp_path: Path) -> None:
     assert subprocess.run([sys.executable, str(script), str(painted)], check=False).returncode == 0
 
 
+def test_screen_stats_keep_pixels_that_look_like_whitespace(tmp_path: Path) -> None:
+    # Splitting the file on whitespace used to eat a first pixel of 0x0a or 0x20
+    # and then call the frame truncated.
+    script = ROOT / "scripts/screen-stats.py"
+    frame = tmp_path / "frame.ppm"
+    pixels = bytes([0x0A, 0x20, 0x09]) + bytes((index * 7) % 256 for index in range(64 * 64 * 3 - 3))
+    frame.write_bytes(b"P6\n# a comment\n64 64\n255\n" + pixels)
+    png = tmp_path / "frame.png"
+    result = subprocess.run(
+        [sys.executable, str(script), str(frame), "--png", str(png)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout
+    assert png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def _gate(snippet: str, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run a snippet with scripts/boot-gate.sh sourced, without running the gate."""
+    return subprocess.run(
+        ["bash", "-c", f"source {ROOT / 'scripts/boot-gate.sh'}; SUDO=(); {snippet}", "_", *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_boot_gate_finds_the_deployment_under_the_physical_root(tmp_path: Path) -> None:
+    # A bootc disk's root partition has no /etc of its own: the system's /etc
+    # is the deployment's, which is where the gate must write its unit.
+    deployment = tmp_path / "ostree/deploy/default/deploy/abc123.0"
+    (deployment / "etc/systemd/system").mkdir(parents=True)
+    (deployment / "etc/profile.d").mkdir()
+    (deployment / "etc/gdm").mkdir()
+    (deployment / "etc/gdm/custom.conf").write_text("# GDM configuration storage\n\n[daemon]\n\n[security]\n")
+    (tmp_path / "boot/loader").mkdir(parents=True)
+    result = _gate('find_deployment "$1"', str(tmp_path))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [str(deployment)]
+
+    result = _gate('write_guest_checks "$1"', str(deployment))
+    assert result.returncode == 0, result.stderr
+    etc = deployment / "etc"
+    unit = (etc / "systemd/system/distr0-boot-gate.service").read_text()
+    assert "After=display-manager.service" in unit
+    assert "WantedBy=graphical.target" in unit
+    link = etc / "systemd/system/graphical.target.wants/distr0-boot-gate.service"
+    assert link.is_symlink() and link.resolve() == (etc / "systemd/system/distr0-boot-gate.service")
+    run = (etc / "distr0-boot-gate/run.sh").read_text()
+    assert subprocess.run(["bash", "-n", str(etc / "distr0-boot-gate/run.sh")], check=False).returncode == 0
+    assert "DISTR0-BOOT-GATE-GREETER" in run and "DISTR0-BOOT-GATE-END" in run
+    assert "EXPECT_GDM_LOGO_SHA256=" in run
+    assert (etc / "distr0-boot-gate/checks.sh").read_text() == (ROOT / "scripts/boot-gate-checks.sh").read_text()
+    # A disk with no account would otherwise boot into gnome-initial-setup.
+    gdm = (etc / "gdm/custom.conf").read_text()
+    assert "[daemon]\nInitialSetupEnable=False\n" in gdm and "[security]" in gdm
+
+    # Writing the checks twice (a rerun on the same disk) changes nothing.
+    assert _gate('write_guest_checks "$1"', str(deployment)).returncode == 0
+    assert (etc / "gdm/custom.conf").read_text() == gdm
+
+
+def test_boot_gate_reads_the_report_between_its_markers(tmp_path: Path) -> None:
+    (tmp_path / "console.log").write_text("kernel noise\r\n")
+    (tmp_path / "guest-report.log").write_text(
+        "DISTR0-BOOT-GATE-BEGIN\r\nDISTR0-BOOT-GATE-GREETER up\r\nok    a check\r\nEXIT=0\r\n"
+        "DISTR0-BOOT-GATE-END\r\n"
+    )
+    result = _gate('WORKDIR="$1"; read_guest_log', str(tmp_path))
+    assert result.returncode == 0, result.stdout
+    assert result.stdout.splitlines() == ["ok    a check", "EXIT=0"]
+
+    (tmp_path / "guest-report.log").write_text("DISTR0-BOOT-GATE-BEGIN\nFAIL  a check\nEXIT=1\nDISTR0-BOOT-GATE-END\n")
+    assert _gate('WORKDIR="$1"; read_guest_log', str(tmp_path)).returncode == 1
+
+    (tmp_path / "guest-report.log").write_text("")
+    result = _gate('WORKDIR="$1"; read_guest_log', str(tmp_path))
+    assert result.returncode == 1
+    assert "left no check report" in result.stdout
+
+
 def test_boot_gate_checks_are_valid_bash_and_cover_the_identity() -> None:
     script = ROOT / "scripts/boot-gate-checks.sh"
     assert subprocess.run(["bash", "-n", str(script)], check=False).returncode == 0

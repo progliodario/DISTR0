@@ -92,7 +92,10 @@ Each of these is load-bearing, and most are enforced by `just lint`:
   tag, refuses an image whose `org.opencontainers.image.revision` label is not
   the commit it checked out, and compares the booted files with this repository
   by SHA-256. Do not make it succeed when the registry is slow or the boot times
-  out: a skipped boot is not a boot.
+  out: a skipped boot is not a boot. The disk keeps SELinux enforcing (never
+  `--disable-selinux`, which adds `selinux=0`); the gate's only changes are its
+  unit in the deployment's `/etc` (the root partition has none of its own) and
+  `InitialSetupEnable=False`, so GDM shows the login screen.
 - **Nothing in `system_files/` is editable on a running system.** It is an
   overlay on a read-only `/`: changing a file means a new image.
 - **Recipe bodies are bash**, so they must stay `bash -n`/`shellcheck` clean.

@@ -128,8 +128,11 @@ jobs:
         with:
           name: boot-gate
           path: |
+            ${{ runner.temp }}/boot-gate/login-screen.png
             ${{ runner.temp }}/boot-gate/login-screen.ppm
             ${{ runner.temp }}/boot-gate/boot-gate.log
+            ${{ runner.temp }}/boot-gate/guest-report.log
+            ${{ runner.temp }}/boot-gate/pull.log
             ${{ runner.temp }}/boot-gate/install.log
             ${{ runner.temp }}/boot-gate/qemu.log
             ${{ runner.temp }}/boot-gate/console.log
