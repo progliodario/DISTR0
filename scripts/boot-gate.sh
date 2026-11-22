@@ -197,6 +197,7 @@ build_disk() {
         -v "${WORKDIR}/output:/output" \
         -v /var/lib/containers:/var/lib/containers \
         "${IMAGE}" bootc install to-disk --via-loopback --filesystem btrfs \
+        --disable-selinux --karg=console=ttyS0,115200n8 \
         --skip-fetch-check /output/disk.raw \
         > "${WORKDIR}/install.log" 2>&1; then
         annotate_log "bootc install" "${WORKDIR}/install.log"
@@ -235,7 +236,12 @@ mount_installed_root() {
         esac
         for opt in "${opts_list[@]}"; do
             if "${SUDO[@]}" mount -t "${fstype}" -o "${opt}" "${part}" "${ROOT_MOUNT}" 2> /dev/null; then
-                return 0
+                # The boot partition is ext4 too: only the root has /etc and
+                # /usr, so a wrong guess is unmounted rather than used.
+                if [[ -d ${ROOT_MOUNT}/etc && -d ${ROOT_MOUNT}/usr ]]; then
+                    return 0
+                fi
+                "${SUDO[@]}" umount "${ROOT_MOUNT}"
             fi
         done
     done
