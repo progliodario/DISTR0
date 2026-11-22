@@ -222,24 +222,24 @@ mount_installed_root() {
     ROOT_MOUNT="$(mktemp -d)"
     ROOT_LOOP="$("${SUDO[@]}" losetup --find --show --partscan "${disk}")"
     "${SUDO[@]}" partprobe "${ROOT_LOOP}" 2> /dev/null || true
+    "${SUDO[@]}" udevadm settle 2> /dev/null || true
     for attempt in $(seq 1 10); do
         [[ -n "$(ls -A "${ROOT_LOOP}"p* 2> /dev/null)" ]] && break
         sleep 1
     done
     layout="$("${SUDO[@]}" lsblk -rno NAME,FSTYPE,SIZE "${ROOT_LOOP}" 2> /dev/null | tr '\n' ' ')"
     phase "disk partitions: ${layout:-none}"
-    # The root is the largest filesystem and normally btrfs; trying it before
-    # ext4 keeps the small boot partition out of the way entirely.
+    # Mount each candidate as each root filesystem type instead of trusting
+    # lsblk/blkid: their FSTYPE comes from udev, and a fresh loop device in a
+    # container has not always been probed yet (which left every FSTYPE empty
+    # and made the gate skip every partition). The root is the one with /etc.
     for fstype in btrfs xfs ext4; do
         for part in "${ROOT_LOOP}"p*; do
             [[ -b ${part} ]] || continue
-            [[ "$("${SUDO[@]}" blkid -o value -s TYPE "${part}" 2> /dev/null)" == "${fstype}" ]] || continue
             opts_list=("rw")
             [[ ${fstype} == btrfs ]] && opts_list=("rw,subvol=root" "rw")
             for opt in "${opts_list[@]}"; do
-                if ! last_err="$("${SUDO[@]}" mount -t "${fstype}" -o "${opt}" "${part}" "${ROOT_MOUNT}" 2>&1)"; then
-                    continue
-                fi
+                last_err="$("${SUDO[@]}" mount -t "${fstype}" -o "${opt}" "${part}" "${ROOT_MOUNT}" 2>&1)" || continue
                 if [[ -d ${ROOT_MOUNT}/etc ]]; then
                     return 0
                 fi
@@ -290,6 +290,8 @@ echo "DISTR0-BOOT-GATE-END"
 sync
 poweroff -f
 EOF
+    # systemd executes the wrapper directly, and tee creates it 0644.
+    "${SUDO[@]}" chmod 0755 "${root}/etc/distr0-boot-gate-checks.sh"
     "${SUDO[@]}" tee "${root}/etc/systemd/system/distr0-boot-gate-checks.service" > /dev/null <<'EOF'
 [Unit]
 Description=DISTR0 boot gate checks
@@ -326,8 +328,9 @@ wait_for_vm_exit() {
 read_guest_log() {
     local console="${WORKDIR}/console.log" log="${WORKDIR}/guest-checks.log"
     if [[ -f ${console} ]]; then
-        sed -n '/^DISTR0-BOOT-GATE-BEGIN$/,/^DISTR0-BOOT-GATE-END$/p' \
-            "${console}" > "${log}"
+        # A serial console writes CRLF; the markers are matched without CR.
+        tr -d '\r' < "${console}" \
+            | sed -n '/^DISTR0-BOOT-GATE-BEGIN$/,/^DISTR0-BOOT-GATE-END$/p' > "${log}"
     fi
     if [[ ! -s ${log} ]]; then
         say "FAIL  the guest left no check report on the serial console"
