@@ -234,37 +234,47 @@ build_disk() {
 }
 
 # The image does not enable sshd, and only the installed system can: mount the
-# root filesystem of the fresh disk and add the wants link.
+# root filesystem of the fresh disk and add the wants link. The link is created
+# without looking for the unit: with a composefs /usr the unit lives in an
+# EROFS image, not in the directory the host sees.
 enable_sshd() {
-    local disk="$1" loop part fstype root mounted="" opts=()
+    local disk="$1" loop part fstype root mounted="" opt
     root="$(mktemp -d)"
     loop="$("${SUDO[@]}" losetup --find --show --partscan "${disk}")"
+    "${SUDO[@]}" partprobe "${loop}" 2> /dev/null || true
+    "${SUDO[@]}" udevadm settle 2> /dev/null || true
     for part in "${loop}"p*; do
         [[ -b ${part} ]] || continue
         fstype="$("${SUDO[@]}" blkid -o value -s TYPE "${part}" 2> /dev/null || true)"
-        opts=(-o rw)
+        local opts_list=()
         case "${fstype}" in
-            btrfs) opts=(-o "rw,subvol=root") ;;
-            xfs | ext4) ;;
+            # The installed root is normally the `root` subvolume; the default
+            # one is the fallback when the image lays it out differently.
+            btrfs) opts_list=("rw,subvol=root" "rw") ;;
+            xfs | ext4) opts_list=("rw") ;;
             *) continue ;;
         esac
-        if "${SUDO[@]}" mount "${opts[@]}" "${part}" "${root}" 2> /dev/null; then
-            if [[ -f ${root}/usr/lib/systemd/system/sshd.service ]]; then
+        for opt in "${opts_list[@]}"; do
+            if "${SUDO[@]}" mount -t "${fstype}" -o "${opt}" "${part}" "${root}" 2> /dev/null; then
                 "${SUDO[@]}" mkdir -p "${root}/etc/systemd/system/multi-user.target.wants"
                 "${SUDO[@]}" ln -sf /usr/lib/systemd/system/sshd.service \
                     "${root}/etc/systemd/system/multi-user.target.wants/sshd.service"
                 mounted="${part}"
                 break
             fi
-            "${SUDO[@]}" umount "${root}"
-        fi
+        done
+        [[ -n ${mounted} ]] && break
     done
     if [[ -n ${mounted} ]]; then
         "${SUDO[@]}" umount "${root}"
+        phase "enabled sshd on $(basename "${mounted}")"
+    else
+        # The boot itself will say whether sshd is on; the partition list is
+        # the only useful clue if it is not.
+        phase "could not mount the installed root (partitions: $("${SUDO[@]}" lsblk -rno NAME,FSTYPE "${loop}" | tr '\n' ' '))"
     fi
     "${SUDO[@]}" losetup -d "${loop}" || true
     rmdir "${root}" 2> /dev/null || true
-    [[ -n ${mounted} ]] || die "could not find the installed root filesystem to enable sshd"
 }
 
 # qcow2 files start with "QFI\xfb"; anything else is a raw disk.
