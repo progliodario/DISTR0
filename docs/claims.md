@@ -32,7 +32,7 @@ Every row ends with one verdict:
 | A kernel is installed | base image | image self-test | image self-test |
 | Flatpaks are declared for first boot (Firefox, Thunderbird, LibreOffice, VLC) | `system_files/usr/share/flatpak/preinstall.d/distr0.preinstall` | image self-test parses the declarations; `scripts/validate.py` checks the exact set | image self-test + repository check |
 | CLI tools are declared for Homebrew (`bottom`, `dust`, `lazygit`, `xh`) | `system_files/usr/share/ublue-os/homebrew/preinstall.d/distr0-cli.Brewfile` | image self-test parses the Brewfile; `scripts/validate.py` checks every entry is a formula | image self-test + repository check |
-| Every action is pinned to a commit and every external image to a digest | `Containerfile`, `Justfile`, `scripts/boot-gate.sh`, `.github/workflows/` | `scripts/validate.py`, including that the three bootc-image-builder pins agree | repository check |
+| Every action is pinned to a commit and every external image to a digest | `Containerfile`, `Justfile`, `.github/workflows/` | `scripts/validate.py`, including that the two bootc-image-builder pins agree | repository check |
 | Images are signed with `cosign.pub` and the policy enforces that key | `.github/workflows/build.yml`, `system_files/etc/containers/registries.d`, `build_files/build.sh` | registry check: the published image is accepted with this key and refused with a throwaway one | registry check |
 | The SBOM attestation verifies and describes this image | `.github/workflows/build.yml`, `.github/workflows/verify-image.yml` | registry check: `cosign verify-attestation --insecure-ignore-tlog` with the shipped key | registry check |
 | An update downloads only the chunks that changed | chunkah in `Justfile` and `.github/workflows/build.yml`, `scripts/layer-diff.py` | measurement printed on the build run summary and quoted in the README | measurement |
@@ -63,10 +63,11 @@ just boot-gate
 just boot-gate ghcr.io/progliodario/distr0:latest "$(git rev-parse HEAD)"
 ```
 
-It pulls the image, builds a qcow2 with the pinned bootc-image-builder, boots it
-with OVMF and QEMU's `-vga std`, waits for GDM, screenshots the framebuffer, and
-runs `scripts/boot-gate-checks.sh` over SSH as the unprivileged `gate` user
-created by `disk_config/boot-gate.toml`. The screenshot and the log are uploaded
+It pulls the image, installs it to a raw disk with the image's own
+`bootc install to-disk`, boots it with OVMF and QEMU's `-vga std`, waits for GDM,
+screenshots the framebuffer, and runs `scripts/boot-gate-checks.sh` over SSH as
+root, whose key the installer injects and whose sshd the gate enables on that
+disk only. The screenshot and the log are uploaded
 with the run; a failure is annotated per check, so it is visible without the job
 log.
 

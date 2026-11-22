@@ -37,10 +37,9 @@ jobs:
     name: Boot to the login screen
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
-    # bootc-image-builder assembles a full disk image and the gate pulls the
-    # container image first: on a slow shared runner that is an hour before the
-    # boot even starts, so the timeout has to cover the wait as well as it.
-    timeout-minutes: 120
+    # The gate pulls the container image and installs it to a disk before it
+    # can boot: a slow runner makes the minutes before the boot unpredictable.
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -129,8 +128,7 @@ jobs:
           path: |
             ${{ runner.temp }}/boot-gate/login-screen.ppm
             ${{ runner.temp }}/boot-gate/boot-gate.log
-            ${{ runner.temp }}/boot-gate/bib.log
-            ${{ runner.temp }}/boot-gate/bib-pull.log
+            ${{ runner.temp }}/boot-gate/install.log
             ${{ runner.temp }}/boot-gate/qemu.log
             ${{ runner.temp }}/boot-gate/console.log
             ${{ runner.temp }}/boot-gate/qmp.log

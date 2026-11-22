@@ -3,35 +3,31 @@
 #
 # The container build and the shipped self-test run without systemd, so neither
 # can show that GDM reaches a login screen or that the desktop reads the files
-# this repository ships. This script builds a disk image with
-# bootc-image-builder, boots it, takes a screenshot of the framebuffer through
+# this repository ships. This script installs the image to a raw disk with the
+# image's own installer, boots it, takes a screenshot of the framebuffer through
 # QMP, and runs scripts/boot-gate-checks.sh inside the guest over SSH.
 #
 # Usage:
 #   scripts/boot-gate.sh --image ghcr.io/progliodario/distr0:latest \
 #       --expect-revision "$(git rev-parse HEAD)"
-#   scripts/boot-gate.sh --qcow2 output/qcow2/disk.qcow2
+#   scripts/boot-gate.sh --disk output/disk.raw
 #
 # The first form is what `.github/workflows/boot-gate.yml` runs: it pulls the
 # published image, refuses one whose OCI revision label is not the commit under
-# test, and builds the disk with the same pinned bootc-image-builder the disk
-# workflow uses. Needs podman with sudo for that, plus qemu, ssh and python3.
+# test, and installs the image to a raw disk with the image's own installer.
+# Needs podman with sudo for that, plus qemu, ssh and python3.
 # KVM turns the boot into a couple of minutes; without it QEMU emulates, which
 # works but is slow.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# The same pin as Justfile and build-disk.yml; scripts/validate.py fails when
-# the three drift apart.
-DEFAULT_BIB_IMAGE="quay.io/centos-bootc/bootc-image-builder@sha256:dab86ee6b46dcade411b37f4e70b07d93b6a06da0dbfec6fe89247a220e0d9f8"
-BIB_IMAGE="${BIB_IMAGE:-${DEFAULT_BIB_IMAGE}}"
-SSH_USER="gate"
+SSH_USER="root"
 BOOT_TIMEOUT=900
 LOGIN_TIMEOUT=420
 PAINT_TIMEOUT=180
 
 IMAGE=""
-QCOW2=""
+DISK=""
 WORKDIR=""
 EXPECT_REVISION=""
 REQUIRE_KVM=""
@@ -61,8 +57,8 @@ usage() {
     cat <<'EOF'
 Boot an image in QEMU and check the running system.
 
-  --image REF            registry image to pull and turn into a qcow2
-  --qcow2 FILE           boot an existing disk image instead
+  --image REF            registry image to pull and install to a disk
+  --disk FILE            boot an existing disk image instead
   --expect-revision SHA  refuse an image whose OCI revision label is not SHA
   --workdir DIR          keep the log and the screenshot here (default: mktemp)
   --timeout SECONDS      how long to wait for the guest to accept SSH
@@ -81,8 +77,8 @@ while [[ $# -gt 0 ]]; do
             IMAGE="${2:?--image needs a value}"
             shift 2
             ;;
-        --qcow2)
-            QCOW2="${2:?--qcow2 needs a value}"
+        --disk)
+            DISK="${2:?--disk needs a value}"
             shift 2
             ;;
         --expect-revision)
@@ -113,15 +109,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -n ${IMAGE} || -n ${QCOW2} ]] || die "one of --image or --qcow2 is required"
-[[ -z ${IMAGE} || -z ${QCOW2} ]] || die "use --image or --qcow2, not both"
+[[ -n ${IMAGE} || -n ${DISK} ]] || die "one of --image or --disk is required"
+[[ -z ${IMAGE} || -z ${DISK} ]] || die "use --image or --disk, not both"
 [[ -z ${EXPECT_REVISION} || -n ${IMAGE} ]] || die "--expect-revision only applies to --image"
 
 WORKDIR="${WORKDIR:-$(mktemp -d "${TMPDIR:-/tmp}/distr0-boot-gate.XXXXXX")}"
 mkdir -p "${WORKDIR}"
 
 if [[ ${EUID} -ne 0 ]]; then
-    command -v sudo > /dev/null 2>&1 || die "sudo is required to build the qcow2"
+    command -v sudo > /dev/null 2>&1 || die "sudo is required to install the disk"
     SUDO=(sudo)
 fi
 
@@ -151,7 +147,7 @@ qemu_running() {
 
 trap stop_vm EXIT
 
-build_qcow2() {
+build_disk() {
     need podman
 
     # The annotations are how this failure becomes readable: the job log needs
@@ -182,28 +178,12 @@ build_qcow2() {
         return 1
     }
 
-    local config="${WORKDIR}/boot-gate.toml"
-    local public_key
-    public_key="$(cat "${WORKDIR}/id_ed25519.pub")"
-    sed "s|__DISTR0_BOOT_GATE_SSH_KEY__|${public_key}|" \
-        "${REPO_ROOT}/disk_config/boot-gate.toml" > "${config}"
-    if grep -q '__DISTR0_BOOT_GATE_SSH_KEY__' "${config}"; then
-        die "the generated disk config still contains the SSH key placeholder"
-    fi
-
     say "Pulling ${IMAGE}"
     if ! pull_image "${IMAGE}" "${WORKDIR}/pull.log"; then
         annotate_log "podman pull" "${WORKDIR}/pull.log"
         die "could not pull ${IMAGE}"
     fi
     phase "pulled ${IMAGE}"
-
-    say "Pulling bootc-image-builder"
-    if ! pull_image "${BIB_IMAGE}" "${WORKDIR}/bib-pull.log"; then
-        annotate_log "bootc-image-builder pull" "${WORKDIR}/bib-pull.log"
-        die "could not pull ${BIB_IMAGE}"
-    fi
-    phase "pulled bootc-image-builder"
 
     if [[ -n ${EXPECT_REVISION} ]]; then
         local revision
@@ -222,38 +202,86 @@ build_qcow2() {
         selinux=(--security-opt label=type:unconfined_t)
     fi
 
-    # podman does not create a missing bind-mount source for a rootful
-    # container, and bootc-image-builder reports the missing /output as a
-    # statfs error that says nothing about the real cause.
     mkdir -p "${WORKDIR}/output"
+    cp "${WORKDIR}/id_ed25519.pub" "${WORKDIR}/output/gate.pub"
+    local disk="${WORKDIR}/output/disk.raw"
+    truncate -s 20G "${disk}"
 
-    say "Building the qcow2 with bootc-image-builder (this takes a few minutes)"
-    phase "building the qcow2 with bootc-image-builder"
-    # BIB assembles a full disk image; an unbounded run would hit the job
-    # timeout and report nothing. 45 minutes is generous for a shared runner.
-    if ! timeout 2700 "${SUDO[@]}" podman run --rm --privileged --pull=missing --net=host \
-        "${selinux[@]}" \
-        -v "${config}:/config.toml:ro" \
+    # bootc's own installer writes the image to a disk in a couple of minutes,
+    # where bootc-image-builder assembles the same disk for the better part of
+    # an hour. The key goes into root so the checks can run over SSH; sshd is
+    # enabled on the installed disk afterwards.
+    say "Installing ${IMAGE} to ${disk} with bootc install to-disk"
+    phase "installing the image with bootc install to-disk"
+    if ! timeout 1800 "${SUDO[@]}" podman run --rm --privileged --pid=host --ipc=host \
+        --pull=missing "${selinux[@]}" \
+        -v /dev:/dev \
         -v "${WORKDIR}/output:/output" \
-        -v /var/lib/containers/storage:/var/lib/containers/storage \
-        "${BIB_IMAGE}" \
-        --type qcow2 --config /config.toml \
-        --use-librepo=True --rootfs=btrfs "${IMAGE}" \
-        > "${WORKDIR}/bib.log" 2>&1; then
-        annotate_log "bootc-image-builder" "${WORKDIR}/bib.log"
-        die "bootc-image-builder failed, see ${WORKDIR}/bib.log"
+        -v /var/lib/containers:/var/lib/containers \
+        "${IMAGE}" bootc install to-disk --via-loopback --filesystem btrfs \
+        --skip-fetch-check \
+        --root-ssh-authorized-keys /output/gate.pub /output/disk.raw \
+        > "${WORKDIR}/install.log" 2>&1; then
+        annotate_log "bootc install" "${WORKDIR}/install.log"
+        die "bootc install failed, see ${WORKDIR}/install.log"
     fi
     "${SUDO[@]}" chown -R "$(id -u):$(id -g)" "${WORKDIR}/output"
-    phase "built the qcow2"
+    phase "installed the disk"
 
-    QCOW2="${WORKDIR}/output/qcow2/disk.qcow2"
-    [[ -f ${QCOW2} ]] || die "bootc-image-builder produced no qcow2 at ${QCOW2}"
+    enable_sshd "${disk}"
+    DISK="${disk}"
+    [[ -s ${DISK} ]] || die "bootc install produced no disk at ${DISK}"
+}
+
+# The image does not enable sshd, and only the installed system can: mount the
+# root filesystem of the fresh disk and add the wants link.
+enable_sshd() {
+    local disk="$1" loop part fstype root mounted="" opts=()
+    root="$(mktemp -d)"
+    loop="$("${SUDO[@]}" losetup --find --show --partscan "${disk}")"
+    for part in "${loop}"p*; do
+        [[ -b ${part} ]] || continue
+        fstype="$("${SUDO[@]}" blkid -o value -s TYPE "${part}" 2> /dev/null || true)"
+        opts=(-o rw)
+        case "${fstype}" in
+            btrfs) opts=(-o "rw,subvol=root") ;;
+            xfs | ext4) ;;
+            *) continue ;;
+        esac
+        if "${SUDO[@]}" mount "${opts[@]}" "${part}" "${root}" 2> /dev/null; then
+            if [[ -f ${root}/usr/lib/systemd/system/sshd.service ]]; then
+                "${SUDO[@]}" mkdir -p "${root}/etc/systemd/system/multi-user.target.wants"
+                "${SUDO[@]}" ln -sf /usr/lib/systemd/system/sshd.service \
+                    "${root}/etc/systemd/system/multi-user.target.wants/sshd.service"
+                mounted="${part}"
+                break
+            fi
+            "${SUDO[@]}" umount "${root}"
+        fi
+    done
+    if [[ -n ${mounted} ]]; then
+        "${SUDO[@]}" umount "${root}"
+    fi
+    "${SUDO[@]}" losetup -d "${loop}" || true
+    rmdir "${root}" 2> /dev/null || true
+    [[ -n ${mounted} ]] || die "could not find the installed root filesystem to enable sshd"
+}
+
+# qcow2 files start with "QFI\xfb"; anything else is a raw disk.
+disk_format() {
+    if [[ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" == "514649fb" ]]; then
+        printf 'qcow2\n'
+    else
+        printf 'raw\n'
+    fi
 }
 
 boot_vm() {
     need qemu-system-x86_64
 
     local accel=tcg cpu=max port code="" vars="" pflash=()
+    local format
+    format="$(disk_format "${DISK}")"
     if [[ -w /dev/kvm ]]; then
         accel=kvm
         cpu=host
@@ -300,7 +328,7 @@ PY
         -machine "q35,accel=${accel}" \
         -cpu "${cpu}" \
         -m 4096 -smp 2 \
-        -drive "file=${QCOW2},if=virtio,format=qcow2" \
+        -drive "file=${DISK},if=virtio,format=${format}" \
         "${pflash[@]}" \
         -vga std \
         -display none \
@@ -311,7 +339,7 @@ PY
 
     QEMU_PID=$!
     SSH_PORT=${port}
-    say "Booting ${QCOW2} (${accel}) with SSH on 127.0.0.1:${port}"
+    say "Booting ${DISK} (${format}, ${accel}) with SSH on 127.0.0.1:${port}"
     phase "booting the disk (${accel})"
 }
 
@@ -481,10 +509,10 @@ bash -s" < "${REPO_ROOT}/scripts/boot-gate-checks.sh"
 }
 
 if [[ -n ${IMAGE} ]]; then
-    build_qcow2
+    build_disk
 fi
 
-[[ -f ${QCOW2} ]] || die "no disk image at ${QCOW2}"
+[[ -f ${DISK} ]] || die "no disk image at ${DISK}"
 
 boot_vm
 wait_for_ssh

@@ -130,10 +130,8 @@ def check_supply_chain() -> None:
 
     workflow = read(".github/workflows/build-disk.yml")
     justfile = read("Justfile")
-    gate = read("scripts/boot-gate.sh")
     in_workflow = re.search(r"bootc-image-builder@(sha256:[0-9a-f]{64})", workflow)
     in_justfile = re.search(r"bootc-image-builder@(sha256:[0-9a-f]{64})", justfile)
-    in_gate = re.search(r"bootc-image-builder@(sha256:[0-9a-f]{64})", gate)
     check(
         "build-disk.yml pins bootc-image-builder by digest",
         in_workflow is not None,
@@ -144,15 +142,10 @@ def check_supply_chain() -> None:
         in_justfile is not None,
         "expected quay.io/centos-bootc/bootc-image-builder@sha256:…",
     )
-    check(
-        "scripts/boot-gate.sh pins bootc-image-builder by digest",
-        in_gate is not None,
-        "the gate must build its disk from the same pinned builder",
-    )
-    if in_workflow and in_justfile and in_gate:
-        digests = {in_workflow.group(1), in_justfile.group(1), in_gate.group(1)}
+    if in_workflow and in_justfile:
+        digests = {in_workflow.group(1), in_justfile.group(1)}
         check(
-            "build-disk.yml, Justfile and boot-gate.sh use the same bootc-image-builder digest",
+            "build-disk.yml and Justfile use the same bootc-image-builder digest",
             len(digests) == 1,
             f"{sorted(digests)}",
         )
@@ -493,6 +486,11 @@ def check_boot_gate() -> None:
     if script.is_file():
         text = script.read_text(encoding="utf-8")
         check("the gate boots QEMU", "qemu-system-x86_64" in text)
+        check(
+            "the gate installs the image with its own installer",
+            "bootc install to-disk" in text,
+            "bootc-image-builder takes long enough that a gate would time out",
+        )
         check("the gate waits for GDM", "gdm.service" in text)
         check("the gate screenshots the framebuffer", "screendump" in text)
         check("the gate runs the in-guest checks", "scripts/boot-gate-checks.sh" in text)
@@ -521,31 +519,6 @@ def check_boot_gate() -> None:
         ):
             check(f"the boot gate checks {label}", marker in text)
 
-    config = ROOT / "disk_config/boot-gate.toml"
-    check("disk_config/boot-gate.toml exists", config.is_file())
-    if config.is_file():
-        try:
-            doc = tomllib.loads(config.read_text(encoding="utf-8"))
-        except tomllib.TOMLDecodeError as exc:
-            check("the gate disk config is valid TOML", False, str(exc))
-        else:
-            check("the gate disk config is valid TOML", True)
-            customizations = doc.get("customizations", {})
-            users = customizations.get("user", [])
-            people = [user.get("name") for user in users if isinstance(user, dict)]
-            check("the gate disk config declares the gate user", people == ["gate"], f"{people}")
-            key = users[0].get("key", "") if users else ""
-            check(
-                "the gate key is a placeholder, not a committed key",
-                key == "__DISTR0_BOOT_GATE_SSH_KEY__",
-                key or "missing",
-            )
-            services = customizations.get("services", {})
-            check(
-                "the gate disk config enables sshd",
-                "sshd" in services.get("enabled", []),
-                f"{services}",
-            )
 
 
 def check_claims() -> None:

@@ -11,7 +11,6 @@ import importlib.util
 import json
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 import pytest
@@ -132,14 +131,6 @@ def test_claim_matrix_uses_known_verdicts() -> None:
     assert verdicts <= validate.CLAIM_STATUSES
     # The gaps stay visible on purpose: an all-green matrix would be a lie.
     assert "machine only" in verdicts
-
-
-def test_boot_gate_config_is_a_gate_only_disk_config() -> None:
-    doc = tomllib.loads((ROOT / "disk_config/boot-gate.toml").read_text(encoding="utf-8"))
-    customizations = doc["customizations"]
-    assert [user["name"] for user in customizations["user"]] == ["gate"]
-    assert customizations["user"][0]["key"] == "__DISTR0_BOOT_GATE_SSH_KEY__"
-    assert "sshd" in customizations["services"]["enabled"]
 
 
 def test_screen_stats_tell_a_desktop_from_a_black_frame(tmp_path: Path) -> None:

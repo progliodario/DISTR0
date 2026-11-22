@@ -133,7 +133,6 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 | `docs/claims.md` | Every promise, the mechanism behind it and the check that proves it |
 | `scripts/boot-gate.sh` | Boots an image in QEMU, screenshots the login screen, runs the in-guest checks |
 | `scripts/boot-gate-checks.sh` | The checks that run inside the booted image, over SSH |
-| `disk_config/boot-gate.toml` | Gate-only disk config: an SSH user, never shipped |
 | `.github/workflows/boot-gate.yml` | Boots every image published on `main` |
 | `scripts/render-assets.py` | Renders the raster assets (`just assets`, needs Pillow) |
 | `tests/test_validate.py` | Unit tests for the checker itself (`just test-unit`) |
