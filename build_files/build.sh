@@ -39,6 +39,17 @@ dnf5 install -y --setopt=install_weak_deps=False \
 dnf5 clean all
 rm -rf /var/lib/dnf /run/dnf
 
+# Fedora 45 ships its repository files in /usr/share/dnf5/repos.d, which the
+# installer ISO's builder does not read: bootc-image-builder failed with
+# "There are no enabled repositories" while resolving Anaconda's packages. A
+# file of the same name in /etc/yum.repos.d replaces the /usr/share one, so
+# copying them adds no repository twice and changes nothing dnf5 sees.
+for repo in /usr/share/dnf5/repos.d/fedora*.repo; do
+    [[ -e "$repo" ]] || continue
+    target="/etc/yum.repos.d/$(basename "$repo")"
+    [[ -e "$target" ]] || install -m 0644 "$repo" "$target"
+done
+
 # ---------------------------------------------------------------------------
 # 3. Branding: desktop defaults, then os-release
 # A gschema override is part of the schema database, not of dconf: it only
@@ -257,6 +268,7 @@ test -f /etc/X11/xorg.conf.d/00-keyboard.conf
 test -f /usr/share/gnome-background-properties/distr0.xml
 test -L /etc/systemd/user/sockets.target.wants/p11-kit-server.socket
 test ! -e /var/lib/dnf
+grep -q '^enabled=1' /etc/yum.repos.d/fedora.repo
 test ! -e /run/dnf
 grep -q '^LANG=it_IT.UTF-8' /etc/locale.conf
 test -f /usr/share/distr0/cosign.pub
