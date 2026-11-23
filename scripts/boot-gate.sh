@@ -11,13 +11,17 @@
 # Usage:
 #   scripts/boot-gate.sh --image ghcr.io/progliodario/distr0:latest \
 #       --expect-revision "$(git rev-parse HEAD)"
+#   scripts/boot-gate.sh --local localhost/distr0:latest \
+#       --expect-revision "$(git rev-parse HEAD)"
 #   scripts/boot-gate.sh --disk output/disk.raw
 #
 # The first form is what `.github/workflows/boot-gate.yml` runs: it pulls the
 # published image, refuses one whose OCI revision label is not the commit under
 # test, and installs the image to a raw disk with the image's own installer.
-# Needs podman with sudo for that, plus qemu and python3. The second form boots
-# a disk that already carries the in-guest checks (one this script installed).
+# The second is what the build runs before it publishes anything: the same gate
+# on the image it just built, already in root's container storage. Both need
+# podman with sudo, plus qemu and python3. The third boots a disk that already
+# carries the in-guest checks (one this script installed).
 # KVM turns the boot into a couple of minutes; without it QEMU emulates, which
 # works but is slow.
 set -euo pipefail
@@ -40,6 +44,7 @@ GATE_DIR=/etc/distr0-boot-gate
 GATE_UNIT=distr0-boot-gate.service
 
 IMAGE=""
+LOCAL=""
 DISK=""
 WORKDIR=""
 EXPECT_REVISION=""
@@ -63,6 +68,7 @@ usage() {
 Boot an image in QEMU and check the running system.
 
   --image REF            registry image to pull and install to a disk
+  --local REF            image already in root's container storage (no pull)
   --disk FILE            boot an existing disk image instead
   --expect-revision SHA  refuse an image whose OCI revision label is not SHA
   --workdir DIR          keep the log and the screenshot here (default: mktemp)
@@ -126,12 +132,19 @@ pull_image() {
 build_disk() {
     need podman
 
-    say "Pulling ${IMAGE}"
-    if ! pull_image "${IMAGE}" "${WORKDIR}/pull.log"; then
-        annotate_log "podman pull" "${WORKDIR}/pull.log"
-        die "could not pull ${IMAGE}"
+    if [[ -n ${LOCAL} ]]; then
+        "${SUDO[@]}" podman image exists "${IMAGE}" \
+            || die "${IMAGE} is not in root's container storage (sudo podman images)"
+        say "Using the local image ${IMAGE}"
+        phase "found the local image ${IMAGE}"
+    else
+        say "Pulling ${IMAGE}"
+        if ! pull_image "${IMAGE}" "${WORKDIR}/pull.log"; then
+            annotate_log "podman pull" "${WORKDIR}/pull.log"
+            die "could not pull ${IMAGE}"
+        fi
+        phase "pulled ${IMAGE}"
     fi
-    phase "pulled ${IMAGE}"
 
     if [[ -n ${EXPECT_REVISION} ]]; then
         local revision
@@ -638,6 +651,11 @@ main() {
                 IMAGE="${2:?--image needs a value}"
                 shift 2
                 ;;
+            --local)
+                IMAGE="${2:?--local needs a value}"
+                LOCAL=1
+                shift 2
+                ;;
             --disk)
                 DISK="${2:?--disk needs a value}"
                 shift 2
@@ -666,9 +684,9 @@ main() {
         esac
     done
 
-    [[ -n ${IMAGE} || -n ${DISK} ]] || die "one of --image or --disk is required"
-    [[ -z ${IMAGE} || -z ${DISK} ]] || die "use --image or --disk, not both"
-    [[ -z ${EXPECT_REVISION} || -n ${IMAGE} ]] || die "--expect-revision only applies to --image"
+    [[ -n ${IMAGE} || -n ${DISK} ]] || die "one of --image, --local or --disk is required"
+    [[ -z ${IMAGE} || -z ${DISK} ]] || die "use --image/--local or --disk, not both"
+    [[ -z ${EXPECT_REVISION} || -n ${IMAGE} ]] || die "--expect-revision only applies to --image and --local"
 
     WORKDIR="${WORKDIR:-$(mktemp -d "${TMPDIR:-/tmp}/distr0-boot-gate.XXXXXX")}"
     mkdir -p "${WORKDIR}"
