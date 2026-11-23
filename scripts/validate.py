@@ -77,14 +77,16 @@ def check_workflows() -> None:
         )
         check(f"{rel} is a workflow", ok, "missing 'name', 'on' or 'jobs'")
 
-    dependabot = ROOT / ".github/dependabot.yml"
-    if yaml is not None and dependabot.exists():
-        doc = yaml.safe_load(dependabot.read_text(encoding="utf-8")) or {}
-        check(
-            ".github/dependabot.yml is a dependabot config",
-            isinstance(doc, dict) and "version" in doc and "updates" in doc,
-        )
-    for path in sorted((ROOT / "disk_config").glob("*.toml")):
+    # One update bot: Dependabot and Renovate both bumped the same actions and
+    # doubled every pull request and branch. Renovate also tracks the digests
+    # pinned in the Justfile and the workflows, which Dependabot cannot.
+    check(
+        "Renovate is the only update bot",
+        (ROOT / ".github/renovate.json5").is_file() and not (ROOT / ".github/dependabot.yml").exists(),
+        "keep .github/renovate.json5, do not add .github/dependabot.yml",
+    )
+    bootc_install = sorted((ROOT / "system_files/usr/lib/bootc/install").glob("*.toml"))
+    for path in [*sorted((ROOT / "disk_config").glob("*.toml")), *bootc_install]:
         rel = path.relative_to(ROOT)
         try:
             tomllib.loads(path.read_text(encoding="utf-8"))
@@ -264,6 +266,14 @@ def check_recipes() -> None:
         f"{switches}",
     )
     justfile = read("Justfile")
+    # A local build must carry what CI's does, or `just boot-gate-local` tests
+    # an image with another version and no revision to check.
+    workflow = read(".github/workflows/build.yml")
+    for arg in ("DISTR0_BUILD_DATE", "DISTR0_REVISION"):
+        check(
+            f"`just build` and CI both pass {arg}",
+            f"{arg}=" in justfile and f"{arg}=" in workflow and arg in read("Containerfile"),
+        )
     for recipe in (
         "build",
         "rechunk",
@@ -273,6 +283,7 @@ def check_recipes() -> None:
         "test",
         "test-unit",
         "boot-gate",
+        "boot-gate-local",
     ):
         check(
             f"Justfile defines {recipe}",
@@ -790,7 +801,9 @@ def check_docs() -> None:
         "SECURITY.md",
         "ASSETS.md",
         "docs/claims.md",
+        "docs/ROADMAP.md",
         "system_files/usr/share/doc/distr0/README.md",
+        "system_files/usr/share/doc/distr0/LEGGIMI.md",
     ):
         if not (ROOT / rel).exists():
             check(f"{rel} exists", False)
@@ -937,6 +950,7 @@ def check_doc_paths() -> None:
         "CONTRIBUTING.md",
         "SECURITY.md",
         CLAIMS,
+        "docs/ROADMAP.md",
         "system_files/usr/share/doc/distr0/README.md",
     ):
         if not (ROOT / rel).exists():
@@ -951,8 +965,10 @@ def check_doc_paths() -> None:
                 if target[1:].lower() not in headings:
                     broken.append(target)
                 continue
+            # Relative to the document, as GitHub resolves it: a link in
+            # docs/ROADMAP.md to ../AGENTS.md is the file at the root.
             path = target.split("#")[0].rstrip("/")
-            if path and not (ROOT / path).exists():
+            if path and not ((ROOT / rel).parent / path).exists():
                 broken.append(target)
         check(f"{rel} has no broken internal links", not broken, f"{broken}")
 
