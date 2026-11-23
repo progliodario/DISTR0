@@ -27,6 +27,14 @@ Every row ends with one verdict:
 | Light mode selects the shipped light wallpaper, dark mode the original | `system_files/etc/dconf/db/distro.d/99-distr0-branding`, `system_files/usr/share/backgrounds/distr0` | boot gate for the light URI and file; the self-test for both URIs and their sizes | boot gate + image self-test |
 | The login banner prints the shipped greeting, only in interactive shells, once per session, and `DISTR0_NO_BANNER=1` turns it off | `system_files/usr/share/distr0/banner.sh`, `system_files/etc/profile.d/zz-distr0-banner.sh` | boot gate: an interactive login shell, a second source of the hook, a silent non-interactive shell, and SHA-256 of both files | boot gate |
 | Italian defaults are active on the booted system | `system_files/etc/locale.conf`, `system_files/etc/vconsole.conf`, `system_files/etc/localtime` | boot gate: `localectl status` and `timedatectl` in the guest | boot gate |
+| The login screen uses the Italian keyboard layout | `system_files/etc/X11/xorg.conf.d/00-keyboard.conf`, `XKBLAYOUT` in `system_files/etc/vconsole.conf` | image self-test for both files; boot gate: `X11 Layout: it` from `localectl status` | boot gate + image self-test |
+| An interactive shell shows one greeting, DISTR0's, never Bluefin's motd | `build_files/build.sh`, `system_files/etc/profile.d/zz-distr0-banner.sh` | image self-test: the motd hook is gone; boot gate: no Bluefin text in an interactive login shell | boot gate + image self-test |
+| Bluefin's tools name DISTR0, and no `ujust` recipe switches the machine away from it | `build_files/build.sh` (`image-info.json`, import order), `system_files/usr/share/ublue-os/just/60-custom.just` | image self-test reads `image-info.json` and the winning body of `toggle-devmode`, `rebase-helper`, `changelogs`, `toggle-user-motd`; `scripts/validate.py` allows `bootc switch` only to DISTR0 with the policy; boot gate: Bluefin's image-info helper says `distr0:latest` | boot gate + image self-test + repository check |
+| The machine is called `distr0` until its owner names it | `system_files/etc/hostname`, `DEFAULT_HOSTNAME` in `build_files/build.sh` | image self-test; boot gate: `hostnamectl hostname` | boot gate + image self-test |
+| Nothing is published unless that very image boots to the login screen | `.github/workflows/build.yml`, `scripts/boot-gate.sh --local` | the build runs the boot gate on the rechunked image before the push step; `scripts/validate.py` checks the order | boot gate + repository check |
+| Every published image carries a signature bootc can verify | `.github/workflows/build.yml` | CI, right after signing: the signature verifies with `cosign.pub` (no transparency log, `--insecure-ignore-tlog`) and sits in the `sha256-<digest>.sig` simple-signing attachment; `scripts/validate.py` forbids cosign v3 without the legacy format | registry check + repository check |
+| The DISTR0 wallpaper can be picked in Settings → Appearance | `system_files/usr/share/gnome-background-properties/distr0.xml` | image self-test: the file is shipped; nothing here opens Settings | image self-test |
+| CIE, CNS and firma digitale cards work with Flatpak browsers | base image (`pcscd`, OpenSC), `p11-kit-server.socket` enabled in `build_files/build.sh`, `ujust distr0-smartcard` | image self-test: the components and the socket are there; CI has no card reader | machine only |
 | Desktop defaults (accent colour, window buttons, touchpad, VRR) are compiled into the schema database | `system_files/usr/share/glib-2.0/schemas/zz0-distr0.gschema.override`, `build_files/build.sh` | image self-test: reads each value back with `GSETTINGS_BACKEND=memory gsettings get` | image self-test |
 | `ujust distr0-*` recipes exist and are valid bash | `system_files/usr/share/ublue-os/just/60-custom.just` | image self-test lists and parses them; `scripts/validate.py` checks the names the docs use | image self-test + repository check |
 | A kernel is installed | base image | image self-test | image self-test |
@@ -52,6 +60,8 @@ by this repository, and the README must not imply otherwise:
 - an actual Anaconda installation from the ISO;
 - a user logging into a GNOME session: the gate reads the compiled desktop
   defaults through dconf, it does not watch a session apply them;
+- smart cards: a CIE or CNS read through a real reader, a signature made with
+  it, a login to a public service with it;
 - `gnome-initial-setup`: the installer leaves account creation to it, so a real
   first boot opens the first-boot assistant. The gate switches it off on its own
   disk to photograph the login screen every later boot shows;
@@ -59,7 +69,10 @@ by this repository, and the README must not imply otherwise:
 
 ## How the gate runs
 
-The gate runs after every successful build on `main` and can be started by hand:
+The build runs the gate on the rechunked image it is about to push, on pull
+requests and on `main`, and publishes nothing when it fails. It runs again after
+every successful build on `main`, on the image as the registry serves it, and
+can be started by hand:
 
 ```bash
 just boot-gate

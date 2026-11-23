@@ -108,9 +108,24 @@ Each of these is load-bearing, and most are enforced by `just lint`:
   any `README.md` table (the changes table keeps its paths in the right-hand
   column, brace forms like `a/{b,c}` are expanded) and in the `## Map` table
   below; and every relative link and in-page anchor in those documents.
-- **The result must stay a valid bootc image**: `bootc container lint` runs in
-  the `Containerfile` and `build.sh` ends with smoke tests that fail the build
-  rather than shipping a broken image.
+- **The result must stay a valid bootc image**: `bootc container lint
+  --fatal-warnings` runs in the `Containerfile` and `build.sh` ends with smoke
+  tests that fail the build rather than shipping a broken image. A package
+  install must not leave state in `/var` or `/run` (`build.sh` removes dnf's).
+- **Nothing is published before it boots.** The build runs the boot gate
+  (`scripts/boot-gate.sh --local`) on the rechunked image between the rechunk
+  and the push; `validate.py` checks that order. Do not move the push above it.
+- **Signatures are made by digest, in the format bootc reads.** cosign stays on
+  v2, or on v3 with `--new-bundle-format=false --use-signing-config=false`:
+  cosign v3's default bundle is invisible to containers/image, and every device
+  would install updates as unsigned. The build checks the `.sig` attachment
+  right after signing; `validate.py` refuses v3 without the flag.
+- **The system names itself DISTR0 everywhere.** Bluefin's tools read
+  `/usr/share/ublue-os/image-info.json`; `build.sh` rewrites it. `ujust` keeps
+  the *first* definition of a recipe across imports, so `build.sh` imports
+  `60-custom.just` first, which is how DISTR0 replaces `toggle-devmode`,
+  `rebase-helper`, `changelogs` and `toggle-user-motd`. A recipe may only
+  `bootc switch` to `ghcr.io/progliodario/distr0`, with the signature policy.
 - **The self-test is the contract.** `/usr/share/distr0/selftest.sh` ships inside
   the image and asserts what the image promises; `just test` and
   `ujust distr0-doctor` both run it. Adding a promise to the README without a
@@ -136,6 +151,8 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 | `docs/claims.md` | Every promise, the mechanism behind it and the check that proves it |
 | `scripts/boot-gate.sh` | Boots an image in QEMU, screenshots the login screen, runs the in-guest checks |
 | `scripts/boot-gate-checks.sh` | The checks that run inside the booted image, at boot |
+| `scripts/boot-gate-ci.sh` | Runs the gate on a runner: a notice per phase, an annotation per failed check |
+| `system_files/usr/share/doc/distr0/LEGGIMI.md` | The user guide, in Italian, shipped in the image |
 | `.github/workflows/boot-gate.yml` | Boots every image published on `main` |
 | `scripts/render-assets.py` | Renders the raster assets (`just assets`, needs Pillow) |
 | `tests/test_validate.py` | Unit tests for the checker itself (`just test-unit`) |
@@ -175,6 +192,11 @@ Each of these is load-bearing, and most are enforced by `just lint`:
   wallpaper) are Italian, and on-device text may be Italian.
 - Prefer the smallest change that solves the problem. New dependencies, services
   or workflows are a maintenance cost someone has to carry.
+- Work on a branch and open a pull request; never push to `main` directly. The
+  pull request runs Validate, the build, the self-test and the boot gate, so a
+  change is proven before it can reach a machine. Merge only when all are green.
+- Renovate is the only update bot. Do not add Dependabot back: both bumped the
+  same actions and doubled every pull request.
 
 ## When something is red
 
@@ -199,9 +221,11 @@ too. `bootc container lint --fatal-warnings` runs advisory and turns each warnin
 into a run annotation: read those on the summary instead of assuming green, since
 the job log may need permissions the repository's automation does not have.
 
-The boot gate (`boot-gate.yml`) also proves that the published image boots to a
-GDM login screen, that the greeter reads the shipped wordmark and wallpaper, and
-that the banner and the Italian defaults are live on the running system.
+The boot gate proves — in the build before publishing, and again in
+`boot-gate.yml` on the published image — that the image boots to a GDM login
+screen, that the greeter reads the shipped wordmark and wallpaper, that the
+banner, the Italian defaults and the login keyboard are live on the running
+system, and that Bluefin's tools see the DISTR0 image.
 
 CI cannot prove what the boot process does on real hardware — Flatpak
 synchronization at boot, `brew-preinstall`, a user logging into a GNOME session,

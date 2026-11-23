@@ -33,10 +33,12 @@ without them it skips those parts and still runs `scripts/validate.py`.
    smoke tests at the end of `build.sh` is not ready.
 4. Commit with an imperative subject and a body that explains *why*. One logical
    change per commit.
-5. Open a pull request. CI runs `Validate` (about a minute) and builds the image
-   without publishing it: a pull request publishes nothing, `latest` never
-   moves. Once the change is on `main`, the boot gate boots the published image
-   and checks it against [`docs/claims.md`](docs/claims.md).
+5. Open a pull request. CI runs `Validate` (about a minute, unit tests
+   included), builds the image, runs its self-test and boots it in the boot
+   gate, without publishing anything: a pull request never moves `latest`. On
+   `main` the same build publishes only after its own boot gate passes, and the
+   published image is booted once more and checked against
+   [`docs/claims.md`](docs/claims.md).
 
 ## Pull request checklist
 
