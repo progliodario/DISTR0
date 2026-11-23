@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE wallpapers SYSTEM "gnome-wp-list.dtd">
+<!-- Makes the DISTR0 wallpaper selectable in Settings > Appearance: one entry,
+     the light picture for light mode and the dark one for dark mode. -->
+<wallpapers>
+  <wallpaper deleted="false">
+    <name>DISTR0</name>
+    <filename>/usr/share/backgrounds/distr0/distr0-wallpaper-light.png</filename>
+    <filename-dark>/usr/share/backgrounds/distr0/distr0-wallpaper.png</filename-dark>
+    <options>zoom</options>
+    <shade_type>solid</shade_type>
+    <pcolor>#070a18</pcolor>
+    <scolor>#070a18</scolor>
+  </wallpaper>
+</wallpapers>

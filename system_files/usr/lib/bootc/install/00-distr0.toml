@@ -1,0 +1,5 @@
+# Default for `bootc install to-disk` (and tools built on it, such as
+# system-reinstall-bootc): btrfs, the filesystem Bluefin installs with, so an
+# install that does not pass --filesystem gets the same layout as the ISO.
+[install.filesystem.root]
+type = "btrfs"

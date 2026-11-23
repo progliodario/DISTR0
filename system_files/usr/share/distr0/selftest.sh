@@ -69,6 +69,17 @@ if [[ -r ${os_release} ]]; then
         bad 'IMAGE_VERSION is set'
     fi
     compare 'LOGO is distr0-logo' "${LOGO:-}" distr0-logo
+    compare 'DEFAULT_HOSTNAME is distr0' "${DEFAULT_HOSTNAME:-}" distr0
+    if [[ ${IMAGE_VERSION:-} =~ ^${VERSION_ID:-x}\.[0-9]{8}$ ]]; then
+        ok "IMAGE_VERSION is DISTR0's own build (${IMAGE_VERSION})"
+    else
+        bad "IMAGE_VERSION is DISTR0's own build" "${IMAGE_VERSION:-unset}"
+    fi
+    if [[ -n ${BLUEFIN_VERSION:-} && -n ${OSTREE_VERSION:-} ]]; then
+        ok "the Bluefin build stays readable (${BLUEFIN_VERSION})"
+    else
+        bad 'BLUEFIN_VERSION and OSTREE_VERSION are set'
+    fi
     # The distribution identity must keep describing the base, not the fork.
     # The exact value is the base image's business; what must not happen is
     # DISTR0 overwriting it, which would break tooling that keys off the distro.
@@ -84,6 +95,8 @@ fi
 # --- Shipped files ----------------------------------------------------------
 for file in \
     /usr/share/doc/distr0/README.md \
+    /usr/share/doc/distr0/LEGGIMI.md \
+    /usr/share/gnome-background-properties/distr0.xml \
     "${wallpaper}" \
     /usr/share/icons/hicolor/scalable/apps/distr0-logo.svg \
     "${preinstall}" "${brewfile}" "${recipes}" "${key}"; do
@@ -105,6 +118,10 @@ esac
 
 expect 'locale is it_IT.UTF-8' grep -q '^LANG=it_IT.UTF-8' /etc/locale.conf
 expect 'console keymap is it2' grep -q '^KEYMAP=it2' /etc/vconsole.conf
+# GDM takes its layout from localed's X11 setting, never from a user's dconf.
+expect 'the login screen keyboard is Italian (vconsole XKBLAYOUT)' grep -q '^XKBLAYOUT=it$' /etc/vconsole.conf
+expect 'the login screen keyboard is Italian (00-keyboard.conf)' \
+    grep -q 'Option "XkbLayout" "it"' /etc/X11/xorg.conf.d/00-keyboard.conf
 expect 'dconf branding ships as 99-' test -f /etc/dconf/db/distro.d/99-distr0-branding
 
 # --- Desktop identity -------------------------------------------------------
@@ -162,6 +179,40 @@ fi
 expect 'light mode uses the light wallpaper' grep -qF "picture-uri='file://${light_wallpaper}'" "${branding}"
 expect 'dark mode uses the dark wallpaper' grep -qF "picture-uri-dark='file://${wallpaper}'" "${branding}"
 
+# --- The system names itself DISTR0 -----------------------------------------
+# Bluefin's tools find "their" image in image-info.json, not in os-release.
+image_info=/usr/share/ublue-os/image-info.json
+compare 'image-info names distr0' "$(jq -r '."image-name"' "${image_info}" 2> /dev/null)" distr0
+compare 'image-info points at the DISTR0 registry' \
+    "$(jq -r '."image-ref"' "${image_info}" 2> /dev/null)" \
+    'ostree-image-signed:docker://ghcr.io/progliodario/distr0'
+expect "Bluefin's motd is replaced by the DISTR0 banner" test ! -e /etc/profile.d/ublue-motd.sh
+expect 'the banner honours ~/.config/no-show-user-motd' grep -qF 'no-show-user-motd' "${banner_hook}"
+
+# `ujust` keeps the first definition of a recipe, so DISTR0's file must be the
+# first import for its replacements to win. Read the winning body back.
+entry=/usr/share/ublue-os/just/00-entry.just
+first_import="$(grep -m1 '^import' "${entry}" 2> /dev/null || true)"
+compare '60-custom.just is the first ujust import' "${first_import}" \
+    'import? "/usr/share/ublue-os/just/60-custom.just"'
+if command -v just > /dev/null; then
+    for recipe in toggle-devmode rebase-helper changelogs toggle-user-motd; do
+        body="$(just --justfile "${entry}" --working-directory / --show "${recipe}" 2> /dev/null || true)"
+        case ${body} in
+            *distr0* | *DISTR0*) ok "ujust ${recipe} is DISTR0's" ;;
+            *) bad "ujust ${recipe} is DISTR0's" 'Bluefin would switch or describe the wrong image' ;;
+        esac
+    done
+else
+    bad 'just is installed'
+fi
+
+# --- Smart cards ------------------------------------------------------------
+expect 'pcscd is available for smart-card readers' test -f /usr/lib/systemd/system/pcscd.socket
+expect 'OpenSC is installed (CIE and CNS driver)' command -v opensc-tool
+expect 'the p11-kit server socket is enabled for every user' \
+    test -L /etc/systemd/user/sockets.target.wants/p11-kit-server.socket
+
 # --- Update verification ----------------------------------------------------
 if [[ -r ${key} ]]; then
     key_header="$(head -c 26 "${key}" 2> /dev/null || true)"
@@ -197,7 +248,7 @@ expect 'registries.d enables sigstore attachments' grep -q 'use-sigstore-attachm
 expect 'the Flatpak list declares at least one app' grep -q '^\[Flatpak Preinstall ' "${preinstall}"
 expect 'the Flatpak list declares Firefox' grep -q 'org.mozilla.firefox' "${preinstall}"
 expect 'the Homebrew list declares formulae' grep -q '^brew "' "${brewfile}"
-for recipe in distr0-info distr0-greeting distr0-update distr0-apps distr0-cli distr0-verify distr0-doctor distr0-rollback; do
+for recipe in distr0-info distr0-greeting distr0-update distr0-apps distr0-cli distr0-verify distr0-doctor distr0-rollback distr0-smartcard; do
     expect "ujust ${recipe} exists" grep -q "^${recipe}" "${recipes}"
 done
 
