@@ -20,7 +20,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
+  # Spelled out rather than built from the repository name: that is "DISTR0",
+  # and an image reference must be lower case, so every run of this workflow
+  # failed before checking anything. It is the policy scope plus the tag.
+  IMAGE: ghcr.io/progliodario/distr0:latest
   # The scope this image ships in /etc/containers/policy.json
   POLICY_SCOPE: ghcr.io/progliodario/distr0
   # The registries.d directory this image ships (sigstore attachments on)
