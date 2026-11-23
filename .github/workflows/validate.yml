@@ -24,6 +24,7 @@ concurrency:
 env:
   JUST_VERSION: "1.59.0"
   PYYAML_VERSION: "6.0.3"
+  PYTEST_VERSION: "9.2.0"
   HADOLINT_VERSION: "2.15.1"
   HADOLINT_SHA256: "c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507"
   ACTIONLINT_VERSION: "1.7.9"
@@ -48,7 +49,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends shellcheck
           python3 -m venv "${RUNNER_TEMP}/tools"
           "${RUNNER_TEMP}/tools/bin/pip" install --disable-pip-version-check --quiet \
-            "rust-just==${JUST_VERSION}" "pyyaml==${PYYAML_VERSION}"
+            "rust-just==${JUST_VERSION}" "pyyaml==${PYYAML_VERSION}" "pytest==${PYTEST_VERSION}"
           echo "${RUNNER_TEMP}/tools/bin" >> "${GITHUB_PATH}"
           curl -fsSL -o /tmp/hadolint \
             "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-x86_64"
@@ -77,3 +78,8 @@ jobs:
 
       - name: Configuration is consistent
         run: just lint
+
+      # The checker and the gate's helpers have their own tests; without this
+      # step they only ran on a contributor's machine, if at all.
+      - name: Unit tests
+        run: just test-unit
