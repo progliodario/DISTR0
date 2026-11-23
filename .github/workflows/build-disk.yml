@@ -79,7 +79,10 @@ jobs:
           image: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.DEFAULT_TAG }}
           chown: ${{ env.USER_UID }}:${{ env.USER_GID }}
           types: ${{ matrix.disk-type }}
-          additional-args: --use-librepo=True
+          # Same as `just build-qcow2`: the builder refuses an image that does
+          # not name a root filesystem, and an explicit one keeps the disk from
+          # depending on what the image declares.
+          additional-args: --use-librepo=True --rootfs=btrfs
 
       - name: Upload disk images and Checksum to Job Artifacts
         if: inputs.upload-to-s3 != true && github.event_name != 'pull_request'
