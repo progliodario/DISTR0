@@ -26,6 +26,7 @@ without them it skips those parts and still runs `scripts/validate.py`.
    ```bash
    just check
    just lint
+   just test-unit
    ```
 
 3. If you touched the image itself (`Containerfile`, `build.sh`, `system_files/`),
@@ -42,12 +43,11 @@ without them it skips those parts and still runs `scripts/validate.py`.
 
 ## Pull request checklist
 
-- [ ] `just check` and `just lint` pass locally
-- [ ] the image still builds if any build input changed (`just build`)
-- [ ] documentation updated when behaviour changed (`README.md`, `AGENTS.md`, or
-      the doc shipped in `system_files/usr/share/doc/distr0/`)
-- [ ] any new pin (image digest, action commit) explained in a comment or the
-      commit body
+The checklist is the pull request template,
+[`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md): the
+three local checks, a build for image changes, a check and a `docs/claims.md`
+row for every new promise, documentation, and an explanation for every new pin.
+What to work on next is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Releasing
 

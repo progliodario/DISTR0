@@ -1,4 +1,6 @@
-export image_name := env("IMAGE_NAME", "distr0") # output image name, usually same as repo name, change as needed
+# Recipes run on the build host. `just --list` groups them; AGENTS.md says which
+# ones a change needs (usually `just check`, `just lint`, `just test-unit`).
+export image_name := env("IMAGE_NAME", "distr0")
 export default_tag := env("DEFAULT_TAG", "latest")
 export bib_image := env("BIB_IMAGE", "quay.io/centos-bootc/bootc-image-builder@sha256:dab86ee6b46dcade411b37f4e70b07d93b6a06da0dbfec6fe89247a220e0d9f8")
 
@@ -10,8 +12,8 @@ alias run-vm := run-vm-qcow2
 default:
     @just --list
 
-# Check Just Syntax
-[group('Just')]
+# Check that every Justfile and *.just parses and is formatted
+[group('Lint')]
 check:
     #!/usr/bin/bash
     find . -type f -name "*.just" | while read -r file; do
@@ -21,8 +23,8 @@ check:
     echo "Checking syntax: Justfile"
     just --unstable --fmt --check -f Justfile
 
-# Fix Just Syntax
-[group('Just')]
+# Format every Justfile and *.just in place
+[group('Lint')]
 fix:
     #!/usr/bin/bash
     find . -type f -name "*.just" | while read -r file; do
@@ -32,18 +34,13 @@ fix:
     echo "Checking syntax: Justfile"
     just --unstable --fmt -f Justfile || { exit 1; }
 
-# Clean Repo
+# Remove build leftovers (_build*, _chunkah_*, output/, local reports)
 [group('Utility')]
 clean:
     #!/usr/bin/bash
     set -eoux pipefail
-    touch _build
-    find *_build* -exec rm -rf {} \;
-    find _chunkah_* -exec rm -rf {} \;
-    rm -f previous.manifest.json
-    rm -f changelog.md
-    rm -f output.env
-    rm -rf output/
+    rm -rf _build* _chunkah_* output/
+    rm -f sbom.spdx.json grype.json
 
 # Sudo Clean Repo
 [group('Utility')]
@@ -69,54 +66,30 @@ sudoif command *args:
     }
     sudoif {{ command }} {{ args }}
 
-# This Justfile recipe builds a container image using Podman.
-#
-# Arguments:
-#   $target_image - The tag you want to apply to the image (default: $image_name).
-#   $tag - The tag for the image (default: $default_tag).
-#
-# The script constructs the version string using the tag and the current date.
-# If the git working directory is clean, it also includes the short SHA of the current HEAD.
-#
-# just build $target_image $tag
-#
-# Example usage:
-# just build distr0 lts
-#
-# This will build an image 'distr0:lts'.
-#
-
-# Build the image using the specified parameters
+# Build the image with podman (-> localhost/distr0:latest)
+[group('Build')]
 build $target_image=image_name $tag=default_tag:
     #!/usr/bin/env bash
-
-    BUILD_ARGS=()
-    if [[ -z "$(git status -s)" ]]; then
-        BUILD_ARGS+=("--build-arg" "SHA_HEAD_SHORT=$(git rev-parse --short HEAD)")
+    set -euo pipefail
+    # The same inputs CI passes: today's date and the commit become
+    # IMAGE_VERSION and BUILD_ID in os-release, and the revision label is what
+    # the boot gate checks. A dirty tree is labelled as such, so a gate run
+    # against it cannot pass for a commit.
+    revision="$(git rev-parse HEAD)"
+    if [[ -n "$(git status --porcelain)" ]]; then
+        revision="${revision}-dirty"
     fi
-
     podman build \
-        "${BUILD_ARGS[@]}" \
+        --build-arg "DISTR0_BUILD_DATE=$(date -u +%Y%m%d)" \
+        --build-arg "DISTR0_REVISION=${revision}" \
+        --label "org.opencontainers.image.revision=${revision}" \
         --pull=newer \
         --tag "${target_image}:${tag}" \
         .
 
-# Command: _rootful_load_image
-# Description: This script checks if the current user is root or running under sudo. If not, it attempts to resolve the image tag using podman inspect.
-#              If the image is found, it loads it into rootful podman. If the image is not found, it pulls it from the repository.
-#
-# Parameters:
-#   $target_image - The name of the target image to be loaded or pulled.
-#   $tag - The tag of the target image to be loaded or pulled. Default is 'default_tag'.
-#
-# Example usage:
-#   _rootful_load_image my_image latest
-#
-# Steps:
-# 1. Check if the script is already running as root or under sudo.
-# 2. Check if target image is in the non-root podman container storage)
-# 3. If the image is found, load it into rootful podman using podman scp.
-# 4. If the image is not found, pull it from the remote repository into reootful podman.
+# Make an image available to root's podman, which bootc-image-builder and the
+# boot gate use: copied from the user's storage when it is there (podman image
+# scp), pulled otherwise. Nothing to do when already root.
 
 _rootful_load_image $target_image=image_name $tag=default_tag:
     #!/usr/bin/bash
@@ -150,15 +123,9 @@ _rootful_load_image $target_image=image_name $tag=default_tag:
         just sudoif podman pull "${target_image}:${tag}"
     fi
 
-# Build a bootc bootable image using Bootc Image Builder (BIB)
-# Converts a container image to a bootable image
-# Parameters:
-#   target_image: The name of the image to build (ex. localhost/fedora)
-#   tag: The tag of the image to build (ex. latest)
-#   type: The type of image to build (ex. qcow2, raw, iso)
-#   config: The configuration file to use for the build (default: disk_config/disk.toml)
-
-# Example: just _rebuild-bib localhost/fedora latest qcow2 disk_config/disk.toml
+# Turn a container image into a disk with bootc-image-builder (pinned by digest).
+# type is a builder type (qcow2, raw, anaconda-iso); config a disk_config/ file.
+# Same flags as .github/workflows/build-disk.yml.
 _build-bib $target_image $tag $type $config: (_rootful_load_image target_image tag)
     #!/usr/bin/env bash
     set -euo pipefail
@@ -188,14 +155,7 @@ _build-bib $target_image $tag $type $config: (_rootful_load_image target_image t
     sudo rmdir $BUILDTMP
     sudo chown -R $USER:$USER output/
 
-# Podman builds the image from the Containerfile and creates a bootable image
-# Parameters:
-#   target_image: The name of the image to build (ex. localhost/fedora)
-#   tag: The tag of the image to build (ex. latest)
-#   type: The type of image to build (ex. qcow2, raw, iso)
-#   config: The configuration file to use for the build (deafult: disk_config/disk.toml)
-
-# Example: just _rebuild-bib localhost/fedora latest qcow2 disk_config/disk.toml
+# Build the container image, then the disk from it.
 _rebuild-bib $target_image $tag $type $config: (build target_image tag) && (_build-bib target_image tag type config)
 
 # Build a QCOW2 virtual machine image
@@ -206,9 +166,9 @@ build-qcow2 $target_image=("localhost/" + image_name) $tag=default_tag: && (_bui
 [group('Build Virtual Machine Image')]
 build-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag "raw" "disk_config/disk.toml")
 
-# Build an ISO virtual machine image
+# Build the installer ISO (Anaconda; installs and then switches to the signed image)
 [group('Build Virtual Machine Image')]
-build-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag "iso" "disk_config/iso.toml")
+build-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag "anaconda-iso" "disk_config/iso.toml")
 
 # Rebuild a QCOW2 virtual machine image
 [group('Build Virtual Machine Image')]
@@ -218,9 +178,9 @@ rebuild-qcow2 $target_image=("localhost/" + image_name) $tag=default_tag: && (_r
 [group('Build Virtual Machine Image')]
 rebuild-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag "raw" "disk_config/disk.toml")
 
-# Rebuild an ISO virtual machine image
+# Rebuild the container image, then the installer ISO
 [group('Build Virtual Machine Image')]
-rebuild-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag "iso" "disk_config/iso.toml")
+rebuild-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag "anaconda-iso" "disk_config/iso.toml")
 
 # Run a virtual machine with the specified image type and configuration
 _run-vm $target_image $tag $type $config:
@@ -265,25 +225,28 @@ _run-vm $target_image $tag $type $config:
     podman run "${run_args[@]}"
 
 # Run a virtual machine from a QCOW2 image
-[group('Run Virtal Machine')]
+[group('Run Virtual Machine')]
 run-vm-qcow2 $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-vm target_image tag "qcow2" "disk_config/disk.toml")
 
 # Run a virtual machine from a RAW image
-[group('Run Virtal Machine')]
+[group('Run Virtual Machine')]
 run-vm-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-vm target_image tag "raw" "disk_config/disk.toml")
 
 # Run a virtual machine from an ISO
-[group('Run Virtal Machine')]
+[group('Run Virtual Machine')]
 run-vm-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-vm target_image tag "iso" "disk_config/iso.toml")
 
 # Run a virtual machine using systemd-vmspawn
-[group('Run Virtal Machine')]
+[group('Run Virtual Machine')]
 spawn-vm rebuild="0" type="qcow2" ram="6G":
     #!/usr/bin/env bash
 
     set -euo pipefail
 
-    [ "{{ rebuild }}" -eq 1 ] && echo "Rebuilding the ISO" && just build-vm {{ rebuild }} {{ type }}
+    if [[ "{{ rebuild }}" -eq 1 ]]; then
+        echo "Rebuilding the {{ type }} disk"
+        just "build-{{ type }}"
+    fi
 
     systemd-vmspawn \
       -M "bootc-image" \
@@ -294,8 +257,8 @@ spawn-vm rebuild="0" type="qcow2" ram="6G":
       --vsock=false --pass-ssh-key=false \
       -i ./output/**/*.{{ type }}
 
-# Split the image into many small layers so that updates download only what changed
-# Uses chunkah (https://github.com/coreos/chunkah). Run it on the image you just built.
+# chunkah (https://github.com/coreos/chunkah), as CI runs it on the image just built.
+# Split the image into up to 128 layers so an update downloads only what changed
 [group('Rechunk')]
 rechunk $target_image=image_name $tag=default_tag:
     #!/usr/bin/env bash
@@ -327,28 +290,8 @@ rechunk $target_image=image_name $tag=default_tag:
     CHUNKED_IMAGE="$(podman pull "oci:${OUTPUT_DIR}/chunked")"
     podman tag "${CHUNKED_IMAGE}" "${target_image}:${tag}"
 
-# Split the image with rpm-ostree's compose build-chunked-oci (classic method)
-[group('Rechunk')]
-ostree-rechunk $target_image=image_name $tag=default_tag:
-    #!/usr/bin/env bash
-    set -xeuo pipefail
-
-    GRAPHROOT="$(podman info --format '{{ '{{.Store.GraphRoot}}' }}')"
-
-    podman run --rm --pull=never --privileged \
-        --mount=type=image,src="${target_image}:${tag}",target=/rpm-ostree \
-        --mount=type=bind,src="${GRAPHROOT}",target=/run/host-container-storage,rw \
-        --mount=type=tmpfs,target=/run/rpm-ostree-storage \
-        --entrypoint /usr/bin/rpm-ostree \
-        "${target_image}:${tag}" \
-        compose build-chunked-oci \
-        --max-layers 127 \
-        --format-version=2 \
-        --bootc \
-        --rootfs /rpm-ostree \
-        --output "containers-storage:[overlay@/run/host-container-storage+/run/rpm-ostree-storage]localhost/${target_image}:${tag}"
-
-# Runs shellcheck on the Bash scripts plus the cross-file checks in scripts/validate.py
+# shellcheck, scripts/validate.py, hadolint and actionlint (the last two when installed)
+[group('Lint')]
 lint:
     #!/usr/bin/env bash
     set -eoux pipefail
@@ -390,7 +333,8 @@ assets:
     fi
     python3 scripts/render-assets.py
 
-# Runs shfmt on all Bash scripts
+# Format every shell script with shfmt
+[group('Lint')]
 format:
     #!/usr/bin/env bash
     set -eoux pipefail
@@ -402,7 +346,7 @@ format:
     # Run shfmt on all Bash scripts
     /usr/bin/find . -iname "*.sh" -type f -exec shfmt --write "{}" ';'
 
-# Report whether the pinned upstream digests (base image, chunkah) have moved; exits non-zero when one is stale
+# Report whether a pinned upstream digest has moved; exits non-zero when one is stale
 [group('Utility')]
 check-updates:
     #!/usr/bin/env bash
@@ -438,15 +382,20 @@ check-updates:
     base_pin="$(grep -oE 'ghcr\.io/ublue-os/bluefin:[^@]+@sha256:[0-9a-f]{64}' Containerfile | head -n1 | sed 's/.*@//')"
     chunkah_pin="$(grep -oE 'quay\.io/coreos/chunkah@sha256:[0-9a-f]{64}' Justfile | head -n1 | sed 's/.*@//')"
     bib_pin="$(grep -oE 'bootc-image-builder@sha256:[0-9a-f]{64}' .github/workflows/build-disk.yml | head -n1 | sed 's/.*@//')"
+    syft_pin="$(grep -oE 'anchore/syft@sha256:[0-9a-f]{64}' .github/workflows/build.yml | head -n1 | sed 's/.*@//')"
+    grype_pin="$(grep -oE 'anchore/grype@sha256:[0-9a-f]{64}' .github/workflows/build.yml | head -n1 | sed 's/.*@//')"
 
     printf 'DISTR0 pins\n'
     report 'bluefin base' 'ghcr.io/ublue-os/bluefin' 'latest' "${base_pin}"
     report 'chunkah' 'quay.io/coreos/chunkah' 'latest' "${chunkah_pin}"
     report 'disk image' 'quay.io/centos-bootc/bootc-image-builder' 'latest' "${bib_pin}"
+    report 'syft' 'ghcr.io/anchore/syft' 'latest' "${syft_pin}"
+    report 'grype' 'ghcr.io/anchore/grype' 'latest' "${grype_pin}"
 
     if [[ "${moved}" -eq 1 ]]; then
-        printf '\nBump the moved pin in Containerfile (base) or Justfile and\n'
-        printf '.github/workflows/build.yml (chunkah). The new digest comes from:\n'
+        printf '\nBump the moved pin where it is used (Containerfile for the base;\n'
+        printf 'Justfile and .github/workflows/ for the tools), or let Renovate do it.\n'
+        printf 'The new digest comes from:\n'
         printf '  skopeo inspect docker://<image> | jq -r .Digest\n'
     else
         printf '\nNothing to do: every pin still matches the registry.\n'
@@ -475,7 +424,7 @@ test-unit:
     fi
     pytest -q tests
 
-# Boot an image in QEMU and check what only a booted system can prove
+# Boot a published image in QEMU and check what only a booted system can prove
 [group('Test')]
 boot-gate image=("ghcr.io/progliodario/" + image_name + ":" + default_tag) revision="":
     #!/usr/bin/env bash
@@ -485,3 +434,10 @@ boot-gate image=("ghcr.io/progliodario/" + image_name + ":" + default_tag) revis
         args+=(--expect-revision "{{ revision }}")
     fi
     scripts/boot-gate.sh "${args[@]}"
+
+# Boot the image `just build` made, exactly as CI does before publishing
+[group('Test')]
+boot-gate-local $target_image=("localhost/" + image_name) $tag=default_tag: (_rootful_load_image target_image tag)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/boot-gate.sh --local "${target_image}:${tag}" --expect-revision "$(git rev-parse HEAD)"

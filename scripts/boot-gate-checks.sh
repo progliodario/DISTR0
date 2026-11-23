@@ -2,7 +2,8 @@
 # Checks that run *inside* the booted image, as root, from a oneshot unit at
 # the end of the boot: the point is to inspect what a user's desktop would read.
 # scripts/boot-gate.sh installs it with the SHA-256 of the files this commit
-# ships in the environment, and the unit prints the output on the serial console.
+# ships in the environment; its wrapper writes the output to the gate's own
+# virtio-serial port, which the host reads back.
 #
 # DISTR0_GATE_ROOT exists only so the repository's own tests can run these
 # checks against a fixture; the gate never sets it, and it defaults to /.

@@ -24,6 +24,7 @@ per chi sviluppa l'immagine.
 | [SECURITY.md](SECURITY.md) | Reporting a vulnerability, the trust model, signing-key rotation |
 | [ASSETS.md](ASSETS.md) | Where every shipped image comes from, and how to regenerate it |
 | [docs/claims.md](docs/claims.md) | Every promise the image makes, the check that proves it, and the gaps that are only tested on a real machine |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | What is done, what comes next and in which order, and what only the owner can do |
 
 ## What DISTR0 changes compared to its base
 
@@ -323,6 +324,7 @@ verifies the recipe syntax on its own.
 just build                                            # -> localhost/distr0:latest
 just test                                             # run the image self-test in a container
 just test-unit                                        # unit tests for the repository's own checks
+just boot-gate-local                                  # boot that build in QEMU, as CI does (needs KVM)
 just assets                                           # regenerate the shipped PNGs (needs Pillow)
 sudo bootc switch --transport containers-storage localhost/distr0:latest
 ```
@@ -330,8 +332,9 @@ sudo bootc switch --transport containers-storage localhost/distr0:latest
 The image carries its own test — `/usr/share/distr0/selftest.sh` — which asserts
 the identity fields, the overlay files, the signature policy and key, the
 declared Flatpaks and formulae, the desktop defaults as the desktop itself reads
-them back, the enabled units and that a kernel is installed. `just test` runs it against the image; `ujust distr0-doctor` runs it
-on a device together with the deployment state, failed units and disk usage.
+them back, the enabled units and that a kernel is installed. `just test` runs it
+against the image; `ujust distr0-doctor` runs it on a device together with the
+deployment state, failed units and disk usage.
 
 Disk images (via [bootc-image-builder](https://osbuild.org/docs/bootc/)):
 
@@ -360,18 +363,21 @@ instead of ten minutes into an image build.
 
 | Path | Purpose |
 | --- | --- |
-| `Containerfile` | Image definition: base image (pinned) + `build_files/build.sh` + `bootc container lint` |
+| `Containerfile` | Image definition: base image (pinned) + `build_files/build.sh` + `/etc/hostname` + `bootc container lint --fatal-warnings` |
 | `build_files/build.sh` | The customization entrypoint: overlay, packages, `os-release` rebrand, services, smoke tests |
 | `system_files/` | Tree mirrored onto `/` at build time (`system_files/etc/foo` → `/etc/foo`); symlinks are preserved |
 | `disk_config/` | bootc-image-builder configs for disk images and the installer ISO |
 | `Justfile` | Local build, VM, lint (`just lint`) and pin (`just check-updates`) recipes |
 | `scripts/validate.py` | Cross-file consistency checks, run by `just lint` and CI |
-| `.github/workflows/` | CI: image build/push/sign, disk images, fast validation, weekly policy enforcement test |
+| `.github/workflows/` | CI: build, boot gate and publish; the published image booted again; disk images; fast validation; weekly policy enforcement test |
 | `cosign.pub` | Public key used to verify published images |
 | `ASSETS.md` | Provenance and regeneration of every shipped image asset |
 | `scripts/render-assets.py` | Renders the wallpapers and the GDM wordmark (`just assets`) |
-| `scripts/boot-gate.sh` | Boots an image in QEMU and checks the running system (`just boot-gate`) |
+| `scripts/boot-gate.sh` | Boots an image in QEMU and checks the running system (`just boot-gate`, `just boot-gate-local`) |
+| `scripts/boot-gate-ci.sh` | Runs the gate on a runner and annotates every failed check |
+| `tests/` | Unit tests for the checker, the gate's scripts and the assets (`just test-unit`) |
 | `docs/claims.md` | Every promise, its mechanism, and the check that proves it — including the gaps |
+| `docs/ROADMAP.md` | What is done, what comes next, and what only the owner can do |
 
 ## Customizing
 
