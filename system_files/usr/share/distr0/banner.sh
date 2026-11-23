@@ -11,7 +11,7 @@
 # shellcheck shell=bash
 
 distr0_banner() {
-    local pretty_name=DISTR0 image_version=unknown base_id=fedora key value
+    local pretty_name=DISTR0 image_version=sconosciuta base_id=fedora key value
     local kernel accent dim reset
 
     if [[ -r /etc/os-release ]]; then
@@ -36,12 +36,12 @@ distr0_banner() {
     fi
 
     printf '\n'
-    printf '  %s%s%s %s·%s image %s\n' "${accent}" "${pretty_name}" "${reset}" "${dim}" "${reset}" "${image_version}"
+    printf '  %s%s%s %s·%s immagine %s\n' "${accent}" "${pretty_name}" "${reset}" "${dim}" "${reset}" "${image_version}"
     printf '  %s%s · kernel %s%s\n' "${dim}" "${base_id}" "${kernel}" "${reset}"
     printf '\n'
-    printf '  %supdate%s   ujust distr0-update\n' "${accent}" "${reset}"
-    printf '  %sverify%s   ujust distr0-verify\n' "${accent}" "${reset}"
-    printf '  %shelp%s     ujust --list        %squiet: DISTR0_NO_BANNER=1%s\n' \
+    printf '  %saggiorna%s   ujust distr0-update\n' "${accent}" "${reset}"
+    printf '  %sverifica%s   ujust distr0-verify\n' "${accent}" "${reset}"
+    printf '  %scomandi%s    ujust --list        %ssilenzio: ujust toggle-user-motd%s\n' \
         "${accent}" "${reset}" "${dim}" "${reset}"
     printf '\n'
 }

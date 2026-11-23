@@ -1,35 +1,41 @@
 # DISTR0 custom recipes.
 #
-# /usr/share/ublue-os/just/00-entry.just imports this file optionally, so `ujust`
-# lists these next to the upstream Bluefin recipes.
+# build.sh moves the import of this file to the top of
+# /usr/share/ublue-os/just/00-entry.just: `ujust` resolves a recipe defined in
+# several imported files to the first import, so that is what lets the recipes
+# below replace Bluefin's recipes of the same name (devmode, rebase-helper,
+# changelogs, toggle-user-motd). Every other Bluefin recipe stays as it is.
+#
+# Messages are Italian, like the rest of the system; recipe names stay English
+# so they match Bluefin's and the documentation.
 
-# Show which image is booted and how it is configured
+# Mostra quale immagine è avviata e come è configurata
 [group('DISTR0')]
 distr0-info:
     #!/usr/bin/env bash
     set -uo pipefail
     . /etc/os-release
     printf 'DISTR0\n'
-    printf '  OS:       %s\n' "${PRETTY_NAME:-unknown}"
-    printf '  Image:    %s %s\n' "${IMAGE_ID:-unknown}" "${IMAGE_VERSION:-unknown}"
-    printf '  Kernel:   %s\n' "$(uname -r)"
-    printf '  Locale:   %s\n' "${LANG:-unset}"
-    printf '  Timezone: %s\n' "$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')"
-    printf '  Flatpaks: %s system, %s user\n' \
+    printf '  Sistema:      %s\n' "${PRETTY_NAME:-sconosciuto}"
+    printf '  Immagine:     %s %s (Bluefin %s)\n' "${IMAGE_ID:-?}" "${IMAGE_VERSION:-?}" "${BLUEFIN_VERSION:-?}"
+    printf '  Kernel:       %s\n' "$(uname -r)"
+    printf '  Lingua:       %s\n' "${LANG:-non impostata}"
+    printf '  Fuso orario:  %s\n' "$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')"
+    printf '  Flatpak:      %s di sistema, %s utente\n' \
         "$(flatpak list --system --app --columns=application 2>/dev/null | wc -l)" \
         "$(flatpak list --user --app --columns=application 2>/dev/null | wc -l)"
-    printf '  Brew:     %s\n' "$(command -v brew || echo 'not installed')"
-    update_timer='no timer'
+    printf '  Homebrew:     %s\n' "$(command -v brew || echo 'non installato')"
+    update_timer='nessun timer'
     for unit in uupd.timer bootc-fetch-apply-updates.timer; do
         if systemctl is-enabled --quiet "${unit}" 2>/dev/null; then
             update_timer="${unit}"
         fi
     done
-    printf '  Updates:  %s\n' "${update_timer}"
+    printf '  Aggiornamenti: %s\n' "${update_timer}"
     printf '\n'
     sudo bootc status | sed -n '1,25p'
 
-# Print the DISTR0 mark and a system summary (fastfetch), or the plain banner
+# Stampa il marchio DISTR0 e un riepilogo del sistema (fastfetch)
 [group('DISTR0')]
 distr0-greeting:
     #!/usr/bin/env bash
@@ -41,7 +47,7 @@ distr0-greeting:
         /usr/share/distr0/banner.sh
     fi
 
-# Update the image, Flatpaks and containers in one go
+# Aggiorna immagine, Flatpak e container in un colpo solo
 [group('DISTR0')]
 distr0-update:
     #!/usr/bin/env bash
@@ -52,45 +58,48 @@ distr0-update:
         sudo bootc upgrade
         flatpak update -y
     fi
-    echo "Done. If a new image was staged, reboot with: sudo systemctl reboot"
+    echo "Fatto. Se è stata preparata una nuova immagine, riavvia con: sudo systemctl reboot"
 
-# Install the Flatpaks declared by the image
+# Installa i Flatpak dichiarati dall'immagine
 [group('DISTR0')]
 distr0-apps:
     #!/usr/bin/env bash
     set -euo pipefail
     sudo flatpak preinstall -y
-    echo "The Flatpaks declared by DISTR0 are installed."
+    echo "I Flatpak dichiarati da DISTR0 sono installati."
 
-# Install the CLI tools declared by the image (Homebrew)
+# Installa gli strumenti da riga di comando dichiarati dall'immagine (Homebrew)
 [group('DISTR0')]
 distr0-cli:
     #!/usr/bin/env bash
     set -euo pipefail
     if ! command -v brew >/dev/null; then
-        echo "Homebrew is not available on this system." >&2
+        echo "Homebrew non è disponibile: si installa al primo accesso grafico." >&2
         exit 1
     fi
-    brew bundle --no-lock --file=/usr/share/ublue-os/homebrew/preinstall.d/distr0-cli.Brewfile
+    # brew bundle no longer writes a lock file, and recent releases reject the
+    # old --no-lock flag outright; the variable is harmless where it is unknown.
+    HOMEBREW_BUNDLE_NO_LOCK=1 brew bundle --file=/usr/share/ublue-os/homebrew/preinstall.d/distr0-cli.Brewfile
 
-# Re-apply the desktop defaults shipped by the image
+# Riapplica le impostazioni del desktop fornite dall'immagine
 [group('DISTR0')]
 distr0-reset-desktop:
     #!/usr/bin/env bash
     set -euo pipefail
     sudo dconf update
     dconf reset -f /org/gnome/desktop/background/
-    echo "Desktop defaults re-applied. Log out and back in."
+    dconf reset -f /org/gnome/desktop/input-sources/
+    echo "Impostazioni del desktop riapplicate. Esci e rientra nella sessione."
 
-# Set the system language (Italian by default)
+# Imposta la lingua del sistema (italiano se non indicata)
 [group('DISTR0')]
 distr0-lang lang="it_IT.UTF-8":
     #!/usr/bin/env bash
     set -euo pipefail
     sudo localectl set-locale LANG="{{ lang }}"
-    echo "Language set to {{ lang }}. Log out and back in."
+    echo "Lingua impostata a {{ lang }}. Esci e rientra nella sessione."
 
-# Check that this system verifies image signatures before applying updates
+# Controlla che questo sistema verifichi la firma delle immagini prima di aggiornare
 [group('DISTR0')]
 distr0-verify:
     #!/usr/bin/env bash
@@ -100,24 +109,24 @@ distr0-verify:
     policy=/etc/containers/policy.json
     registries=/etc/containers/registries.d/ghcr.io-progliodario.yaml
 
-    printf 'DISTR0 update verification\n'
+    printf 'Verifica degli aggiornamenti DISTR0\n'
     if [[ -f "${key}" ]]; then
-        printf '  key:         %s\n' "${key}"
+        printf '  chiave:      %s\n' "${key}"
     else
-        printf '  key:         MISSING, the image is not the one described in the README\n'
+        printf "  chiave:      MANCANTE, questa non è l'immagine descritta nel README\n"
     fi
 
     scope="$(jq -c '.transports.docker["ghcr.io/progliodario/distr0"][0] // empty' "${policy}" 2>/dev/null)"
     if [[ -n "${scope}" ]]; then
         printf '  policy:      %s\n' "${scope}"
     else
-        printf '  policy:      no sigstoreSigned scope for ghcr.io/progliodario/distr0\n'
+        printf '  policy:      nessuna regola sigstoreSigned per ghcr.io/progliodario/distr0\n'
     fi
 
     if [[ -f "${registries}" ]]; then
-        printf '  signatures:  looked up next to the image (registries.d)\n'
+        printf "  firme:       cercate accanto all'immagine (registries.d)\n"
     else
-        printf '  signatures:  %s is missing\n' "${registries}"
+        printf '  firme:       %s manca\n' "${registries}"
     fi
 
     # The deployment origin records whether updates are checked against that
@@ -126,11 +135,11 @@ distr0-verify:
     case "${ref}" in
         ostree-image-signed:*)
             printf '  deployment:  %s\n' "${ref}"
-            printf '\nUpdates are verified: an image not signed by this key is refused.\n'
+            printf "\nGli aggiornamenti sono verificati: un'immagine non firmata con questa chiave viene rifiutata.\n"
             ;;
         ostree-unverified-*|"")
-            printf '  deployment:  %s\n' "${ref:-unknown, see: sudo bootc status}"
-            printf '\nUpdates are NOT verified yet. Switch once to the signed reference:\n'
+            printf '  deployment:  %s\n' "${ref:-sconosciuto, vedi: sudo bootc status}"
+            printf '\nGli aggiornamenti NON sono ancora verificati. Passa una volta al riferimento firmato:\n'
             printf '  sudo bootc switch --enforce-container-sigpolicy ghcr.io/progliodario/distr0:latest\n'
             ;;
         *)
@@ -138,7 +147,7 @@ distr0-verify:
             ;;
     esac
 
-# Run the image self-test, the deployment state and the usual suspects in one go
+# Esegue l'autotest dell'immagine e controlla stato, servizi e disco
 [group('DISTR0')]
 distr0-doctor:
     #!/usr/bin/env bash
@@ -146,36 +155,131 @@ distr0-doctor:
 
     failed=0
 
-    printf '=== contents\n'
+    printf '=== contenuto\n'
     /usr/share/distr0/selftest.sh || failed=1
 
     printf '\n=== deployment\n'
     sudo bootc status | sed -n '1,14p'
 
-    printf '\n=== failed units\n'
+    printf '\n=== servizi falliti\n'
     systemctl --failed --no-legend --no-pager || true
 
-    printf '\n=== software the image declares\n'
+    printf "\n=== software dichiarato dall'immagine\n"
     for unit in flatpak-preinstall.service brew-preinstall.service; do
         printf '  %-28s %s\n' "${unit}" "$(systemctl is-active "${unit}" 2>/dev/null || true)"
     done
 
-    printf '\n=== disk\n'
+    printf '\n=== disco\n'
     df -h / /var 2>/dev/null || df -h /
 
     exit "${failed}"
 
-# Return the machine to the previous deployment (staged until the next reboot)
+# Torna al deployment precedente (attivo dal prossimo riavvio)
 [group('DISTR0')]
 distr0-rollback:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    printf 'This stages a rollback to the previous deployment.\n'
-    read -r -p 'Continue? [y/N] ' reply
-    if [[ ! "${reply}" =~ ^[yY]$ ]]; then
-        echo 'Nothing done.'
+    printf 'Questo prepara il ritorno al deployment precedente.\n'
+    read -r -p 'Continuare? [s/N] ' reply
+    if [[ ! "${reply}" =~ ^[sSyY]$ ]]; then
+        echo 'Nessuna modifica.'
         exit 0
     fi
     sudo bootc rollback
-    echo 'Rollback staged. Reboot to use it: sudo systemctl reboot'
+    echo 'Rollback preparato. Riavvia per usarlo: sudo systemctl reboot'
+
+# Controlla lettore di smart card, CIE/CNS e moduli PKCS#11 per firma e accesso ai servizi
+[group('DISTR0')]
+distr0-smartcard:
+    #!/usr/bin/env bash
+    set -uo pipefail
+
+    printf 'Smart card (CIE, CNS, firma digitale)\n\n'
+    printf '  pcscd:           %s\n' "$(systemctl is-active pcscd.socket 2>/dev/null || true)"
+    printf '  p11-kit server:  %s\n' "$(systemctl --user is-active p11-kit-server.socket 2>/dev/null || true)"
+    opensc_module=""
+    for candidate in /usr/lib64/pkcs11/opensc-pkcs11.so /usr/lib64/opensc-pkcs11.so; do
+        [[ -e "${candidate}" ]] && opensc_module="${candidate}" && break
+    done
+    printf '  modulo OpenSC:   %s\n' "${opensc_module:-non trovato}"
+
+    printf '\n=== lettori\n'
+    if ! opensc-tool --list-readers 2>&1; then
+        echo 'Nessun lettore trovato: collega il lettore e riprova.'
+        exit 1
+    fi
+
+    printf '\n=== carta\n'
+    if opensc-tool --name 2>/dev/null; then
+        pkcs11-tool --module "${opensc_module:-opensc-pkcs11.so}" --list-slots 2>/dev/null | sed -n '1,20p'
+    else
+        echo 'Nessuna carta nel lettore, oppure carta non riconosciuta da OpenSC.'
+    fi
+
+    printf '\nFirefox (Flatpak) usa le smart card tramite il server p11-kit: dopo aver\n'
+    printf 'inserito la carta, riavvia Firefox e cercala in Impostazioni > Privacy e\n'
+    printf 'sicurezza > Dispositivi di sicurezza.\n'
+
+# DISTR0 has no developer variant: replaces Bluefin's toggle-devmode, which
+# would `bootc switch` this machine to bluefin-dx and leave DISTR0.
+# Modalità sviluppatore: non disponibile in DISTR0
+[group('System')]
+toggle-devmode:
+    #!/usr/bin/env bash
+    echo "DISTR0 non ha una variante per sviluppatori: questo comando non cambia immagine."
+    echo "Gli strumenti di sviluppo si installano senza cambiare sistema:"
+    echo "  ujust bbrew            applicazioni e strumenti da Homebrew"
+    echo "  distrobox create       un ambiente Fedora/Ubuntu completo in un container"
+
+# Replaces Bluefin's rebase-helper (and its alias rollback-helper), which only
+# knows Bluefin's images: this one picks a dated DISTR0 build or goes back to
+# following `latest`, always through the signed reference.
+# Passa a una build DISTR0 di una data precisa, o torna a seguire latest
+[group('System')]
+rebase-helper:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    image=ghcr.io/progliodario/distr0
+    echo "Immagine attuale: $(jq -r '"\(."image-name"):\(."image-tag")"' /usr/share/ublue-os/image-info.json)"
+    mapfile -t tags < <(skopeo list-tags "docker://${image}" \
+        | jq -r '.Tags[]' | grep -E '^latest\.[0-9]{8}$' | sort -rV | head -n 30)
+    choice="$(gum choose --header="Scegli la build" latest "${tags[@]}" annulla)"
+    [[ -z "${choice}" || "${choice}" == annulla ]] && exit 0
+    gum confirm "Passare a ${image}:${choice}?" || exit 0
+    pkexec bootc switch --enforce-container-sigpolicy "${image}:${choice}"
+    echo "Fatto. Riavvia per usare la nuova immagine."
+
+# Replaces Bluefin's changelogs (and its alias changelog), which shows Bluefin's
+# release notes for the image named in image-info.json.
+# Mostra le ultime modifiche a DISTR0
+[group('System')]
+changelogs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    . /etc/os-release
+    echo "DISTR0 ${IMAGE_VERSION:-?} (commit ${BUILD_ID:-?}), su Bluefin ${BLUEFIN_VERSION:-?}"
+    echo
+    echo "Ultime modifiche a DISTR0:"
+    curl -fsSL "https://api.github.com/repos/progliodario/DISTR0/commits?per_page=15" \
+        | jq -r '.[] | "  \(.commit.author.date[:10])  \(.commit.message | split("\n")[0])"' \
+        || echo "  non raggiungibili ora: https://github.com/progliodario/DISTR0/commits/main"
+    echo
+    echo "Le novità di Bluefin, la base: https://github.com/ublue-os/bluefin/releases"
+
+# Replaces Bluefin's toggle-user-motd: DISTR0 shows its own banner instead of
+# Bluefin's motd, and the banner honours the same per-user switch.
+# Attiva o disattiva il messaggio di benvenuto nel terminale
+[group('System')]
+toggle-user-motd:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    flag="${HOME}/.config/no-show-user-motd"
+    if [[ -e "${flag}" ]]; then
+        rm -f "${flag}"
+        echo "Il benvenuto DISTR0 verrà mostrato nei nuovi terminali."
+    else
+        mkdir -p "${HOME}/.config"
+        touch "${flag}"
+        echo "Il benvenuto DISTR0 non verrà più mostrato."
+    fi

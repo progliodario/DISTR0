@@ -29,5 +29,16 @@ What this image adds on top of [Bluefin](https://projectbluefin.io/):
 - A self-test of everything above: `/usr/share/distr0/selftest.sh`, or
   `ujust distr0-doctor` for the same test plus deployment, failed units and disk
 
+- Identity everywhere the system names itself: `image-info.json` (read by the
+  motd, `ujust changelogs` and the rebase helpers), the default hostname, one
+  Italian greeting instead of Bluefin's motd, and `ujust devmode` /
+  `ujust rebase-helper` that never switch the machine away from DISTR0
+- The Italian keyboard on the login screen too (`/etc/X11/xorg.conf.d/00-keyboard.conf`)
+- Smart cards (CIE, CNS, firma digitale): the p11-kit server socket is enabled
+  for every user so Flatpak browsers see the card; `ujust distr0-smartcard`
+  checks reader and card
+
+The guide for users, in Italian, is `/usr/share/doc/distr0/LEGGIMI.md`.
+
 DISTR0 is built on Bluefin, which is built on Fedora Atomic Desktops by the
 Universal Blue project.
