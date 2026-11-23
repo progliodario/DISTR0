@@ -32,10 +32,11 @@ jobs:
     name: Build and push image
     runs-on: ubuntu-24.04
 
+    # Push, sign and attest need the package; nothing here writes to the
+    # repository, and signing uses the key, not an OIDC token.
     permissions:
-      contents: write
+      contents: read
       packages: write
-      id-token: write
 
     steps:
       - name: Prepare environment
@@ -103,6 +104,8 @@ jobs:
           # https://artifacthub.io/docs/topics/repositories/container-images/
           # https://linux.die.net/man/1/date
           echo "date=$(date -u +%Y\-%m\-%d\T%H\:%M\:%S\Z)" >> $GITHUB_OUTPUT
+          # The same day, as build.sh writes it into IMAGE_VERSION.
+          echo "day=$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
 
       # Image metadata for https://artifacthub.io/ - This is optional but is highly recommended so we all can get a index of all the custom images
       # The metadata by itself is not going to do anything, you choose if you want your image to be on ArtifactHub or not.
@@ -168,6 +171,9 @@ jobs:
           image: ${{ env.IMAGE_NAME }}
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            DISTR0_BUILD_DATE=${{ steps.date.outputs.day }}
+            DISTR0_REVISION=${{ github.sha }}
           oci: false
 
       # The image carries its own test. Static lint cannot tell whether the
@@ -189,41 +195,6 @@ jobs:
               FAIL*) echo "::error title=DISTR0 self-test::${line}" ;;
             esac
           done < "${report}"
-          exit 1
-
-      # Advisory on purpose: `--fatal-warnings` can fail on warnings that come
-      # from the base image, which this project does not control. Read the log,
-      # tighten the base or fix what is ours, and only then make it blocking.
-      - name: bootc container lint (advisory)
-        continue-on-error: true
-        run: |
-          set -xeuo pipefail
-          report="${RUNNER_TEMP}/bootc-lint.log"
-          if podman run --rm --security-opt label=disable \
-               "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" \
-               bootc container lint --fatal-warnings > "${report}" 2>&1; then
-            cat "${report}"
-            exit 0
-          fi
-          cat "${report}"
-          # This step is advisory because the warnings can come from the base
-          # image, which this project does not control. Annotations put them on
-          # the run summary, where they are seen, instead of in a log that the
-          # repository's own automation may not be allowed to read.
-          annotated=0
-          while IFS= read -r line; do
-            case "${line}" in
-              warning:*|error:*)
-                if [[ ${annotated} -lt 20 ]]; then
-                  echo "::warning title=bootc container lint::${line}"
-                  annotated=$((annotated + 1))
-                fi
-                ;;
-            esac
-          done < "${report}"
-          if [[ ${annotated} -eq 0 ]]; then
-            echo '::warning title=bootc container lint::lint failed without a warning: line, see the log above'
-          fi
           exit 1
 
       # Rechunk: rebuild the image with many small layers instead of one big
@@ -260,7 +231,58 @@ jobs:
           for tag in ${{ steps.metadata.outputs.tags }}; do
             podman tag "${CHUNKED_IMAGE}" "localhost/${IMAGE_NAME}:${tag}"
           done
+          # The boot gate installs with root's podman: give it the very image
+          # that will be pushed, not a copy of the unchunked build.
+          ROOT_IMAGE="$(sudo podman pull "oci:${OUTPUT_DIR}/chunked")"
+          sudo podman tag "${ROOT_IMAGE}" "localhost/${IMAGE_NAME}:${DEFAULT_TAG}"
           sudo rm -rf "${OUTPUT_DIR}"
+
+      # Nothing is published until this image has booted: the boot gate installs
+      # it to a disk, boots it with KVM, and runs the in-guest checks against
+      # this commit. On a pull request it tests the change before it is merged.
+      - name: Install QEMU for the boot gate
+        run: |
+          set -xeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+          qemu-system-x86_64 --version
+
+      - name: Enable KVM for the boot gate
+        run: |
+          set -xeuo pipefail
+          # The runner user cannot join the kvm group mid-job and the device is
+          # root:kvm 0660; this udev rule is GitHub's documented way to open it.
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Boot the image before publishing it
+        run: |
+          set -xeuo pipefail
+          scripts/boot-gate-ci.sh "${RUNNER_TEMP}/boot-gate" \
+            --local "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" \
+            --expect-revision "${GITHUB_SHA}" \
+            --require-kvm
+          # The gate's disk is not needed any more, and the push needs room.
+          sudo rm -rf "${RUNNER_TEMP}/boot-gate/output"
+          sudo podman rmi -f "localhost/${IMAGE_NAME}:${DEFAULT_TAG}" || true
+
+      - name: Upload the boot gate's screenshot and logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: boot-gate-build
+          path: |
+            ${{ runner.temp }}/boot-gate/login-screen.png
+            ${{ runner.temp }}/boot-gate/boot-gate.log
+            ${{ runner.temp }}/boot-gate/guest-report.log
+            ${{ runner.temp }}/boot-gate/install.log
+            ${{ runner.temp }}/boot-gate/qemu.log
+            ${{ runner.temp }}/boot-gate/console.log
+          if-no-files-found: warn
+          retention-days: 7
 
       # These `if` statements are so that pull requests for your custom images do not make it publish any packages under your name without you knowing
       # They also check if the runner is on the default branch so that things like the merge queue (if you enable it), are going to work
@@ -317,6 +339,40 @@ jobs:
           jq -r '.packages | length' sbom.spdx.json | xargs -I{} echo "SBOM lists {} packages"
           du -h sbom.spdx.json
 
+      # Which known vulnerabilities the published packages carry, from the SBOM
+      # just made: a report on the run summary, not a gate. Most fixes arrive
+      # with the next Bluefin base bump, so this is what tells when one is due.
+      - name: Report known vulnerabilities (grype, pinned by digest)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        continue-on-error: true
+        run: |
+          set -xeuo pipefail
+          podman run --rm -v "${PWD}:/work:Z" -w /work \
+            ghcr.io/anchore/grype@sha256:661583704a253c0448ed63998b5ea2cd9d5a76ee71eedc4aed439b8ce3e93a1c \
+            sbom:/work/sbom.spdx.json -o json=/work/grype.json
+          {
+            echo '### Known vulnerabilities in the published packages'
+            echo
+            echo '| Severity | Count | With a fix available |'
+            echo '| --- | --- | --- |'
+            jq -r '
+              [.matches[] | {s: .vulnerability.severity, fixed: (.vulnerability.fix.state == "fixed")}]
+              | group_by(.s)[]
+              | "| \(.[0].s) | \(length) | \(map(select(.fixed)) | length) |"
+            ' grype.json
+            echo
+            echo 'Critical and high with a fix:'
+            echo
+            jq -r '
+              [.matches[]
+               | select((.vulnerability.severity == "Critical" or .vulnerability.severity == "High")
+                        and .vulnerability.fix.state == "fixed")
+               | "- \(.vulnerability.id) in \(.artifact.name) \(.artifact.version) (fixed in \(.vulnerability.fix.versions | join(", ")))"]
+              | unique | .[:25][]
+            ' grype.json
+          } >> "${GITHUB_STEP_SUMMARY}"
+          rm -f grype.json
+
       # This section is optional and only needs to be enabled if you plan on distributing
       # your project for others to consume. You will need to create a public and private key
       # using Cosign and save the private key as a repository secret in Github for this workflow
@@ -327,20 +383,54 @@ jobs:
         with:
           cosign-release: 'v2.6.3'
 
+      # Signed by digest: every tag names the same manifest, a signature is
+      # stored per digest, and signing a tag could sign whatever the tag points
+      # at by then. cosign stays on v2, whose default is the `.sig` attachment
+      # containers/image (bootc, podman, skopeo) reads; cosign v3 writes a
+      # bundle they cannot see unless signing passes --new-bundle-format=false
+      # (scripts/validate.py enforces that if the version is ever raised).
       - name: Sign container image
         if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         run: |
+          set -xeuo pipefail
           IMAGE_FULL="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"
+          DIGEST="${{ steps.push.outputs.digest }}"
+          [[ "${DIGEST}" == sha256:* ]] || { echo "::error::the push reported no digest"; exit 1; }
           # No transparency-log upload: the devices verify this signature against
           # the key in /etc/containers/policy.json, which does not consult Rekor,
           # so a public service being down must not decide whether a build ships.
-          for tag in ${{ steps.metadata.outputs.tags }}; do
-            cosign sign -y --tlog-upload=false --key env://COSIGN_PRIVATE_KEY "${IMAGE_FULL}:${tag}"
-          done
+          cosign sign -y --tlog-upload=false --key env://COSIGN_PRIVATE_KEY "${IMAGE_FULL}@${DIGEST}"
         env:
-          TAGS: ${{ steps.push.outputs.digest }}
           COSIGN_EXPERIMENTAL: false
           COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+
+      # The check bootc performs on every device, made here and now instead of
+      # a week later in verify-image.yml: the signature verifies with the shipped
+      # key, and it sits where containers/image looks for it, as the
+      # `sha256-<digest>.sig` simple-signing attachment. A cosign that wrote any
+      # other format would fail here, before a single machine refused an update.
+      - name: The signature is one bootc can verify
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          set -xeuo pipefail
+          IMAGE_FULL="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"
+          DIGEST="${{ steps.push.outputs.digest }}"
+          cosign verify --key ./cosign.pub --insecure-ignore-tlog "${IMAGE_FULL}@${DIGEST}" > /dev/null
+          # One signature covers every tag only if every tag names this digest.
+          for tag in ${{ steps.metadata.outputs.tags }}; do
+            tagged="$(skopeo inspect --format '{{.Digest}}' "docker://${IMAGE_FULL}:${tag}")"
+            if [[ "${tagged}" != "${DIGEST}" ]]; then
+              echo "::error title=Signature coverage::${tag} is ${tagged}, the signed digest is ${DIGEST}"
+              exit 1
+            fi
+          done
+          attachment="${IMAGE_FULL}:${DIGEST/:/-}.sig"
+          media="$(skopeo inspect --raw "docker://${attachment}" | jq -r '.layers[0].mediaType')"
+          if [[ "${media}" != application/vnd.dev.cosign.simplesigning.v1+json ]]; then
+            echo "::error title=Signature format::${attachment} holds '${media}', which containers/image cannot verify"
+            exit 1
+          fi
+          echo "Signed as ${attachment} (${media})."
 
       # The SBOM is signed by the same key as the image, so `verify-image.yml`
       # can check that the inventory belongs to the image it describes.
@@ -349,13 +439,12 @@ jobs:
         run: |
           set -xeuo pipefail
           IMAGE_FULL="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"
-          # By tag, like the signature: the registry resolves it to the digest and
-          # an attestation is stored per digest, so one tag is enough.
+          # By digest, like the signature: an attestation is stored per digest.
           ls -lh sbom.spdx.json
           # Same reasoning as the signature: key-based verification on the device,
           # no Rekor dependency in the build.
           if ! output="$(cosign attest -y --tlog-upload=false --key env://COSIGN_PRIVATE_KEY \
-                 --type spdxjson --predicate sbom.spdx.json "${IMAGE_FULL}:${DEFAULT_TAG}" 2>&1)"; then
+                 --type spdxjson --predicate sbom.spdx.json "${IMAGE_FULL}@${{ steps.push.outputs.digest }}" 2>&1)"; then
             echo "${output}"
             echo "::error title=SBOM attestation::$(printf '%s' "${output}" | tail -n 4 | tr '\n' ' ' | cut -c1-800) | sbom $(du -h sbom.spdx.json | cut -f1)"
             exit 1

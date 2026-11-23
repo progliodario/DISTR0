@@ -6,3 +6,4 @@ _build-*/**
 sbom.spdx.json
 __pycache__/
 .pytest_cache/
+grype.json

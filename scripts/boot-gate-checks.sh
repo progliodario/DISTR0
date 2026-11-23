@@ -149,15 +149,29 @@ check "the login banner greets an interactive login shell" banner_shows
 check "the login banner stays out of non-interactive shells" banner_is_silent
 check "DISTR0_NO_BANNER=1 silences the login banner" banner_can_be_disabled
 check "the login banner greets once per session" banner_greets_once
+# Bluefin's motd named the base image (ghcr.io/ublue-os/bluefin) on top of the
+# DISTR0 banner; one greeting, DISTR0's, is the promise.
+one_greeting() { ! grep -qiE 'Welcome to Bluefin|ublue-os/bluefin' <<< "${interactive}"; }
+check "an interactive shell shows only the DISTR0 greeting" one_greeting
+
+# --- The system names itself DISTR0 -----------------------------------------
+# The helper appends a padlock for the deployment's signature state.
+image_info_is_distr0() { [[ "$(ublue-image-info.sh 2> /dev/null)" == "distr0:latest"* ]]; }
+check "Bluefin's tools see the DISTR0 image" image_info_is_distr0
+hostname_is_distr0() { [[ "$(hostnamectl hostname 2> /dev/null || hostname)" == distr0 ]]; }
+check "the default hostname is distr0" hostname_is_distr0
 
 # --- Italian defaults, on the booted system ---------------------------------
 locale_status="$(localectl status 2> /dev/null || true)"
 locale_is_italian() { grep -q 'LANG=it_IT.UTF-8' <<< "${locale_status}"; }
 keymap_is_italian() { grep -q 'VC Keymap: it2' <<< "${locale_status}"; }
+# The layout GDM uses for the password field: localed's X11 setting.
+x11_layout_is_italian() { grep -qE 'X11 Layout: it$' <<< "${locale_status}"; }
 timezone_is_rome() { [[ "$(timedatectl show -p Timezone --value 2> /dev/null)" == Europe/Rome ]]; }
 
 check "the locale is it_IT.UTF-8" locale_is_italian
 check "the console keymap is it2" keymap_is_italian
+check "the login screen keyboard layout is it" x11_layout_is_italian
 check "the timezone is Europe/Rome" timezone_is_rome
 
 # --- Result -----------------------------------------------------------------

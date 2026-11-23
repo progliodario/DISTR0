@@ -1,7 +1,9 @@
 ---
 # A container build cannot show GDM starting or the desktop reading a dconf
-# database: that needs a systemd boot. This gate boots the image that was just
-# published, waits for the login screen, screenshots the framebuffer and runs
+# database: that needs a systemd boot. The build already runs this gate on the
+# image it built, before publishing; this workflow runs it again on the image
+# as the registry serves it, pulled by tag and held to the commit it was built
+# from. It waits for the login screen, screenshots the framebuffer and runs
 # scripts/boot-gate-checks.sh inside the guest. `docs/claims.md` maps each
 # promise to the check that proves it.
 name: Boot the published image
@@ -76,51 +78,13 @@ jobs:
       - name: Boot the image and check the running system
         run: |
           set -xeuo pipefail
-          workdir="${RUNNER_TEMP}/boot-gate"
-          mkdir -p "${workdir}"
-          report="${workdir}/boot-gate.log"
-
-          args=(--image "${IMAGE}" --workdir "${workdir}" --require-kvm)
+          args=(--image "${IMAGE}" --require-kvm)
           if [[ -n "${EXPECTED_REVISION}" ]]; then
             args+=(--expect-revision "${EXPECTED_REVISION}")
           fi
-
-          # Stream the report so each phase becomes a notice while the gate is
-          # still running: a slow run then says where it stopped instead of
-          # leaving the job timeout as the only clue.
-          set +e
-          # Even a bug in the wait loops must end the step while the report can
-          # still be annotated, rather than at the job timeout.
-          timeout 3000 scripts/boot-gate.sh "${args[@]}" 2>&1 | while IFS= read -r line; do
-            printf '%s\n' "${line}" >> "${report}"
-            case "${line}" in
-              PHASE\ *) echo "::notice title=DISTR0 boot gate::${line#PHASE }" ;;
-            esac
-          done
-          status=${PIPESTATUS[0]}
-          set -e
-
-          if [[ ${status} -eq 0 ]]; then
-            cat "${report}"
-            exit 0
-          fi
-
-          cat "${report}"
-          # One annotation per failed check: the job log needs permissions the
-          # repository's own automation may not have, annotations do not.
-          annotated=0
-          while IFS= read -r line; do
-            case "${line}" in
-              FAIL*)
-                echo "::error title=DISTR0 boot gate::${line}"
-                annotated=$((annotated + 1))
-                ;;
-            esac
-          done < "${report}"
-          if [[ ${annotated} -eq 0 ]]; then
-            echo "::error title=DISTR0 boot gate::$(tail -n 1 "${report}")"
-          fi
-          exit 1
+          # The wrapper streams each phase as a notice and annotates every
+          # failed check, so a red run says why without the job log.
+          scripts/boot-gate-ci.sh "${RUNNER_TEMP}/boot-gate" "${args[@]}"
 
       - name: Upload the login screen and the log
         if: always()
