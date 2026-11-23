@@ -161,6 +161,19 @@ def check_supply_chain() -> None:
             "system_files/etc/containers/registries.d" in text,
             "it must test the shipped file, not a copy of it",
         )
+        # The image it pulls must be the one the policy scope names, in lower
+        # case: built from the repository name ("DISTR0") it was an invalid
+        # reference, and the enforcement test never ran.
+        image = re.search(r"^\s*IMAGE:\s*(\S+)", text, re.MULTILINE)
+        scope = re.search(r"^\s*POLICY_SCOPE:\s*(\S+)", text, re.MULTILINE)
+        check(
+            "verify-image.yml tests the image its policy scope names",
+            image is not None
+            and scope is not None
+            and image.group(1) == f"{scope.group(1)}:latest"
+            and image.group(1) == image.group(1).lower(),
+            f"IMAGE {image.group(1) if image else 'missing'}",
+        )
 
 
 def check_verification() -> None:
