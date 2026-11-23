@@ -9,20 +9,15 @@ on:
         required: false
         default: false
         type: boolean
-      platform:
-        required: true
-        type: choice
-        default: amd64
-        options:
-          - amd64
-          - arm64
   pull_request:
     branches:
       - main
+    # GitHub matches these against repository paths, which never start with
+    # "./": with that prefix the filter matched nothing and never ran.
     paths:
-      - './disk_config/disk.toml'
-      - './disk_config/iso.toml'
-      - './.github/workflows/build-disk.yml'
+      - 'disk_config/disk.toml'
+      - 'disk_config/iso.toml'
+      - '.github/workflows/build-disk.yml'
 
 env:
   IMAGE_NAME: ${{ github.event.repository.name }} # output of build.yml, keep in sync
@@ -40,17 +35,16 @@ concurrency:
 jobs:
   build:
     name: Build disk images
-    # Default to amd64: on pull_request events `inputs.platform` is empty, and the
-    # published image is amd64-only, so an arm64 runner would fail the build.
-    runs-on: ${{ inputs.platform == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    # The published image is amd64 only, so is every disk made from it.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         disk-type: ["qcow2", "anaconda-iso"]
+    # Reads the public image and uploads an artifact: nothing is written back.
     permissions:
-      contents: write
-      packages: write
-      id-token: write
+      contents: read
+      packages: read
 
     steps:
       - name: Prepare environment
@@ -66,16 +60,7 @@ jobs:
           echo "USER_UID=${USER_UID}" >> ${GITHUB_ENV}
           echo "USER_GID=${USER_GID}" >> ${GITHUB_ENV}
 
-      - name: Install dependencies
-        if: inputs.platform == 'arm64'
-        run: |
-          set -x
-          sudo apt update -y
-          sudo apt install -y \
-            podman
-
       - name: Maximize build space
-        if: inputs.platform != 'arm64'
         uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
         with:
           remove-codeql: true

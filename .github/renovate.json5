@@ -1,21 +1,64 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  // Renovate is the only update bot: Dependabot used to bump the same actions,
+  // which doubled every pull request and branch.
   "extends": [
     "config:best-practices",
   ],
 
-  "rebaseWhen": "never",
+  // One batch a week, in the maintainer's time zone, so updates arrive as a
+  // few reviewable pull requests instead of a stream of branches.
+  "timezone": "Europe/Rome",
+  "schedule": ["before 9am on monday"],
+  "rebaseWhen": "conflicted",
 
   "packageRules": [
     {
-      "automerge": true,
-      "matchUpdateTypes": ["pin", "pinDigest"]
+      "description": "Every action update in one pull request.",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions",
     },
     {
-      "enabled": false,
-      "matchUpdateTypes": ["digest", "pinDigest", "pin"],
-      "matchDepTypes": ["container"],
-      "matchFileNames": [".github/workflows/**.yaml", ".github/workflows/**.yml"],
+      "description": "The Bluefin base changes what every machine runs: always on its own, never merged automatically. The build's boot gate tests it before anything is published.",
+      "matchFileNames": ["Containerfile"],
+      "groupName": "Bluefin base image",
+      "automerge": false,
     },
-  ]
+    {
+      "description": "The build tools pinned by digest (chunkah, syft, bootc-image-builder) move together.",
+      "matchDepNames": [
+        "quay.io/coreos/chunkah",
+        "ghcr.io/anchore/syft",
+        "quay.io/centos-bootc/bootc-image-builder",
+      ],
+      "groupName": "Build tools",
+    },
+    {
+      "description": "cosign 3 signs in a format bootc cannot verify unless signing passes --new-bundle-format=false; a major bump needs that change made by hand (scripts/validate.py enforces it).",
+      "matchDepNames": ["sigstore/cosign"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false,
+    },
+  ],
+
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Container images pinned by digest outside a Dockerfile: the Justfile and the workflows. The pin tracks the tag `just check-updates` compares it with.",
+      "managerFilePatterns": ["/^Justfile$/", "/^\\.github/workflows/.+\\.ya?ml$/"],
+      "matchStrings": [
+        "(?<depName>quay\\.io/coreos/chunkah|quay\\.io/centos-bootc/bootc-image-builder|ghcr\\.io/anchore/syft)@(?<currentDigest>sha256:[0-9a-f]{64})",
+      ],
+      "datasourceTemplate": "docker",
+      "currentValueTemplate": "latest",
+    },
+    {
+      "customType": "regex",
+      "description": "The cosign release the installer action downloads.",
+      "managerFilePatterns": ["/^\\.github/workflows/.+\\.ya?ml$/"],
+      "matchStrings": ["cosign-release: '(?<currentValue>v[0-9.]+)'"],
+      "depNameTemplate": "sigstore/cosign",
+      "datasourceTemplate": "github-releases",
+    },
+  ],
 }
