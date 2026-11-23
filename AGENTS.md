@@ -15,30 +15,41 @@ by `build_files/build.sh`, and GitHub Actions build, rechunk, sign and push
 `bootc upgrade` or Bluefin's `uupd` timer. Nothing here runs "live": every change
 reaches a machine through a new image.
 
+## Where things stand
+
+[`docs/ROADMAP.md`](docs/ROADMAP.md) is the plan: what is done, what is next
+and in which order, what each next step needs, and what only the owner can do.
+Read it before starting new work and update it in the same pull request that
+finishes or changes a step.
+
 ## The five-minute loop
 
 ```bash
-just check    # every Justfile and *.just parses and is formatted
-just lint     # shellcheck, scripts/validate.py, hadolint, actionlint
+just check      # every Justfile and *.just parses and is formatted
+just lint       # shellcheck, scripts/validate.py, hadolint, actionlint
+just test-unit  # pytest: the checker, the boot gate's helpers, the assets
 ```
 
-Both must pass before a commit; `.github/workflows/validate.yml` runs exactly
-these two commands on every push and pull request. A change that fails them is
-not finished, even if it "looks right".
+All three must pass before a commit; `.github/workflows/validate.yml` runs
+exactly these commands on every push and pull request. A change that fails
+them is not finished, even if it "looks right".
 
-These do not run the image build:
+These run the image build or need a VM:
 
 ```bash
-just build          # podman build -> localhost/distr0:latest (several minutes)
-just boot-gate      # boot the published image in QEMU and check what booted
-just rechunk        # chunkah, same split CI does
-just build-iso      # installer ISO via bootc-image-builder
-just run-vm-qcow2   # boot the qcow2 in a browser VM
-just check-updates  # have the pinned upstream digests moved?
-just clean          # remove build leftovers (_build*, _chunkah_*, output/)
+just build            # podman build -> localhost/distr0:latest (several minutes)
+just test             # the image self-test, in a container
+just boot-gate-local  # the boot gate on the image `just build` made (needs KVM)
+just boot-gate        # the boot gate on the published image
+just rechunk          # chunkah, same split CI does
+just build-iso        # installer ISO via bootc-image-builder
+just run-vm-qcow2     # boot the qcow2 in a browser VM
+just check-updates    # have the pinned upstream digests moved?
+just clean            # remove build leftovers (_build*, _chunkah_*, output/)
 ```
 
-Only the first is needed for a code change; none are needed for documentation.
+A change to the image needs `just build` and `just test`; the pull request
+runs the boot gate on it. None of these are needed for documentation.
 
 ## Invariants
 
@@ -88,10 +99,11 @@ Each of these is load-bearing, and most are enforced by `just lint`:
   says which ones are only tested on a real machine. Adding a claim means adding
   a row and, where possible, a check; marking something `machine only` while the
   README presents it as proven is a documentation bug.
-- **The boot gate runs the image users get, not a local build.** It pulls the
-  tag, refuses an image whose `org.opencontainers.image.revision` label is not
-  the commit it checked out, and compares the booted files with this repository
-  by SHA-256. Do not make it succeed when the registry is slow or the boot times
+- **The boot gate tests the image users get.** In the build it boots the
+  rechunked image that is about to be pushed; after publishing,
+  `boot-gate.yml` pulls the tag and boots that. Both refuse an image whose
+  `org.opencontainers.image.revision` label is not the commit checked out, and
+  compare the booted files with this repository by SHA-256. Do not make it succeed when the registry is slow or the boot times
   out: a skipped boot is not a boot. The disk keeps SELinux enforcing (never
   `--disable-selinux`, which adds `selinux=0`); the gate's only changes are its
   unit in the deployment's `/etc` (the root partition has none of its own) and
@@ -149,21 +161,25 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 | `system_files/etc/dconf/db/gdm.d/01-distr0-gdm` | Login-screen wordmark for GDM |
 | `ASSETS.md` | Provenance and regeneration of the shipped art |
 | `docs/claims.md` | Every promise, the mechanism behind it and the check that proves it |
-| `scripts/boot-gate.sh` | Boots an image in QEMU, screenshots the login screen, runs the in-guest checks |
+| `docs/ROADMAP.md` | What is done, what is next, and what only the owner can do |
+| `scripts/boot-gate.sh` | Installs an image to a disk, boots it in QEMU, screenshots the login screen, runs the in-guest checks (`--image`, `--local`, `--disk`) |
 | `scripts/boot-gate-checks.sh` | The checks that run inside the booted image, at boot |
 | `scripts/boot-gate-ci.sh` | Runs the gate on a runner: a notice per phase, an annotation per failed check |
 | `system_files/usr/share/doc/distr0/LEGGIMI.md` | The user guide, in Italian, shipped in the image |
-| `.github/workflows/boot-gate.yml` | Boots every image published on `main` |
+| `.github/workflows/boot-gate.yml` | Boots every image published on `main`, as the registry serves it |
 | `scripts/render-assets.py` | Renders the raster assets (`just assets`, needs Pillow) |
-| `tests/test_validate.py` | Unit tests for the checker itself (`just test-unit`) |
+| `tests/` | Unit tests (`just test-unit`): `test_validate.py` for the checker, `test_boot_gate.py` for the gate's scripts, `test_assets.py` for the screenshot parser and the wordmark |
+| `system_files/usr/lib/bootc/install/00-distr0.toml` | `bootc install` defaults (btrfs) |
+| `system_files/etc/X11/xorg.conf.d/00-keyboard.conf` | The login screen's keyboard layout |
 | `.github/copilot-instructions.md` | Symlink to `AGENTS.md`, so every agent reads one file |
 | `system_files/etc/containers/` | Update-verification policy (`policy.json` scope + `registries.d`) |
 | `disk_config/` | bootc-image-builder inputs; `iso.toml` also carries the installer's `bootc switch` |
 | `Justfile` | Everything you run on the build host |
 | `scripts/validate.py` | Cross-file invariants; the source of truth for `just lint` |
 | `scripts/layer-diff.py` | What an update downloads, from two image manifests |
-| `.github/workflows/build.yml` | Build → self-test → rechunk → push → sign → SBOM attestation on `main` (and weekly) |
-| `.github/workflows/validate.yml` | `just check` + `just lint`, in about a minute |
+| `.github/workflows/build.yml` | Build → self-test → rechunk → boot gate → push → sign by digest → signature check → SBOM, attestation, vulnerability report; pull requests stop after the boot gate |
+| `.github/workflows/validate.yml` | `just check` + `just lint` + `just test-unit`, in about a minute |
+| `.github/renovate.json5` | The only update bot: actions, the base digest, the tool digests, cosign |
 | `.github/workflows/verify-image.yml` | Weekly: the published image must pass the shipped policy and fail with another key |
 | `.github/workflows/build-disk.yml` | qcow2 / raw / ISO on demand |
 
@@ -181,6 +197,11 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 | Change branding | `build.sh` for `os-release`, `system_files/usr/share/{backgrounds,icons,pixmaps}` for art, then `ASSETS.md` |
 | Change the greeting or the summary | `system_files/usr/share/distr0/banner.sh`, the fastfetch preset, or `ujust distr0-greeting` |
 | Prove a new promise | Add the check to `system_files/usr/share/distr0/selftest.sh` or `scripts/boot-gate-checks.sh`, then a row in `docs/claims.md` |
+| Replace a Bluefin `ujust` recipe | Define it with the same name in `60-custom.just` (imported first, so it wins), then add the name to `check_recipes` in `scripts/validate.py` |
+| Change what Bluefin's tools think the image is | The `image-info.json` merge in `build.sh` |
+| Write a file under `/etc/hostname`, `/etc/hosts` or `/etc/resolv.conf` | A `COPY` in the `Containerfile`: a `RUN` step only sees the builder's own bind-mounted file |
+| Test an image change in a VM before pushing | `just build`, then `just boot-gate-local` |
+| Tell users something | `system_files/usr/share/doc/distr0/LEGGIMI.md` (Italian), and a recipe message in `60-custom.just` |
 | Change where the installer points | `disk_config/iso.toml` |
 
 ## Conventions
@@ -214,12 +235,13 @@ Each of these is load-bearing, and most are enforced by `just lint`:
 
 ## What CI proves, and what only a machine can
 
-CI proves: the image builds, the shipped self-test passes inside it, the image is
-rechunked, it is signed, the signature verifies with `cosign.pub` and is enforced
-against a throwaway key (`verify-image.yml`), and the SBOM attestation verifies
-too. `bootc container lint --fatal-warnings` runs advisory and turns each warning
-into a run annotation: read those on the summary instead of assuming green, since
-the job log may need permissions the repository's automation does not have.
+CI proves: the image builds and passes `bootc container lint --fatal-warnings`,
+the shipped self-test passes inside it, it is rechunked, the rechunked image
+boots to the login screen, it is signed by digest, the signature verifies with
+`cosign.pub` and sits where bootc looks for it, it is enforced against a
+throwaway key (`verify-image.yml`), and the SBOM attestation verifies too.
+Failures are run annotations: read those on the summary, since the job log may
+need permissions the repository's automation does not have.
 
 The boot gate proves — in the build before publishing, and again in
 `boot-gate.yml` on the published image — that the image boots to a GDM login
