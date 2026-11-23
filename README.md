@@ -5,9 +5,15 @@ DISTR0 is a custom [bootc](https://github.com/bootc-dev/bootc) image built on
 desktop — with a small, reproducible customization layer of its own.
 
 ```bash
-sudo bootc switch --transport registry ghcr.io/progliodario/distr0:latest
+sudo bootc switch --enforce-container-sigpolicy ghcr.io/progliodario/distr0:latest
 sudo systemctl reboot
 ```
+
+**In italiano:** la guida per chi usa DISTR0 — comandi, aggiornamenti,
+rollback, applicazioni, CIE/CNS e firma digitale — è
+[`LEGGIMI.md`](system_files/usr/share/doc/distr0/LEGGIMI.md), installata anche
+nel sistema in `/usr/share/doc/distr0/LEGGIMI.md`. Il resto di questo README è
+per chi sviluppa l'immagine.
 
 ## Documentation
 
@@ -27,8 +33,14 @@ tooling. Its own delta:
 
 | Change | Where |
 | --- | --- |
-| Identity: `os-release` rebrand, a wallpaper per colour scheme, `distr0-logo`, login-screen wordmark | `build_files/build.sh`, `system_files/usr/share/{backgrounds,icons,pixmaps}` |
-| Quiet login banner and `ujust distr0-greeting` (fastfetch) | `system_files/{etc/profile.d,usr/share/distr0,usr/share/fastfetch}` |
+| Identity: `os-release` rebrand (own `IMAGE_VERSION`), hostname `distr0`, a wallpaper per colour scheme, `distr0-logo`, login-screen wordmark | `build_files/build.sh`, `system_files/etc/hostname`, `system_files/usr/share/{backgrounds,icons,pixmaps}` |
+| Bluefin's tools name DISTR0 too: `image-info.json` rewritten, `ujust devmode`, `rebase-helper`, `changelogs` and `toggle-user-motd` replaced so none of them leaves DISTR0 | `build_files/build.sh`, `system_files/usr/share/ublue-os/just/60-custom.just` |
+| Wallpaper selectable in Settings → Appearance | `system_files/usr/share/gnome-background-properties/distr0.xml` |
+| Italian keyboard on the login screen, not only in the session | `system_files/etc/X11/xorg.conf.d/00-keyboard.conf`, `system_files/etc/vconsole.conf` |
+| Smart cards (CIE, CNS, firma digitale) for Flatpak browsers: p11-kit server socket for every user, `ujust distr0-smartcard` | `build_files/build.sh`, `system_files/usr/share/ublue-os/just/60-custom.just` |
+| A user guide in Italian | `system_files/usr/share/doc/distr0/LEGGIMI.md` |
+| `bootc install` defaults to btrfs | `system_files/usr/lib/bootc/install/00-distr0.toml` |
+| One quiet login banner in Italian, replacing Bluefin's motd, and `ujust distr0-greeting` (fastfetch) | `system_files/{etc/profile.d,usr/share/distr0,usr/share/fastfetch}` |
 | Desktop defaults compiled into the schema database: accent, buttons, touchpad, VRR | `system_files/usr/share/glib-2.0/schemas/zz0-distr0.gschema.override`, `build_files/build.sh` |
 | Italian defaults: locale `it_IT.UTF-8`, timezone `Europe/Rome`, console keymap `it2`, GNOME keyboard layout `it` | `system_files/etc/{locale.conf,vconsole.conf,localtime}`, `system_files/etc/dconf/db/distro.d/99-distr0-branding` |
 | GUI apps declared for first boot: Firefox, Thunderbird, LibreOffice, VLC | `system_files/usr/share/flatpak/preinstall.d/distr0.preinstall` |
@@ -48,10 +60,12 @@ apps, Homebrew for CLI tools, distrobox/toolbox for workloads).
 | --- | --- |
 | `ghcr.io/progliodario/distr0:latest` | `ghcr.io/ublue-os/bluefin:latest` (pinned by digest, Fedora 45) |
 
-Every build on `main` publishes `latest`, `latest.<YYYYMMDD>` and `<YYYYMMDD>`.
-Pull requests build the image and run the self-test, but publish nothing: a fork
-cannot write to this repository's packages, and a commit nobody has reviewed
-must not become a tag someone installs. The push, sign and attest steps are all
+Every build on `main` publishes `latest`, `latest.<YYYYMMDD>` and `<YYYYMMDD>`,
+and only after the image it is about to push has booted in the boot gate (see
+below): a build that does not reach the login screen publishes nothing. Pull
+requests build the image, run the self-test and the boot gate, but publish
+nothing: a fork cannot write to this repository's packages, and a commit nobody
+has reviewed must not become a tag someone installs. The push, sign and attest steps are all
 gated on the default branch. The scheduled rebuild runs weekly: because the base
 image is pinned by digest, a rebuild republishes the same content — bumping the
 pin is what brings new upstream packages in (see
@@ -111,10 +125,19 @@ verifies against, so a Rekor outage cannot block a release.
   banner and the art the desktop points at, the units this repository enables
   itself, and that a kernel is installed. It runs on pull requests too, before
   the image is rechunked.
-- `bootc container lint --fatal-warnings` — advisory for now: a warning that
-  comes from the base image must not stop the pipeline. Each warning becomes a
-  run annotation, so it is visible on the summary even when the job log is not
-  readable (see `AGENTS.md`).
+- `bootc container lint --fatal-warnings` — in the `Containerfile`, so a
+  warning fails the build. The two the image used to raise came from this
+  repository's own `dnf5 install` (state left in `/var/lib/dnf` and `/run/dnf`);
+  `build.sh` now removes it.
+- the boot gate, on the rechunked image about to be pushed (see below).
+- after signing, the check every device makes: the signature verifies with
+  `cosign.pub` and is stored as the `sha256-<digest>.sig` simple-signing
+  attachment containers/image reads. cosign v3's default bundle format is
+  invisible to bootc, so a cosign that changed format fails the build that day.
+- grype, pinned by digest, on the SBOM of the published image: the known
+  vulnerabilities by severity, and the critical and high ones that already have
+  a fix, on the run summary. A report, not a gate: most fixes arrive with the
+  next Bluefin base bump, and this says when one is due.
 - `scripts/layer-diff.py` — compares the manifest of the published image with
   the new one and writes what an update will download into the run summary. The
   numbers above were measured this way.
@@ -122,21 +145,25 @@ verifies against, so a Rekor outage cannot block a release.
 ### The image is booted, not just built
 
 A container build cannot show GDM starting or the desktop reading a dconf
-database: that needs a systemd boot. `.github/workflows/boot-gate.yml` runs
-after every successful build on `main`, pulls the image that was just published,
-installs it to a raw disk with `bootc install to-disk` (SELinux enforcing, as
-installed) and boots it in QEMU. It waits for the
-greeter, screenshots the framebuffer through QMP, and runs
-`scripts/boot-gate-checks.sh` inside the guest at boot. Those checks compare the
+database: that needs a systemd boot. The build runs the boot gate on the image
+it is about to push — on pull requests too — and publishes nothing if it fails;
+`.github/workflows/boot-gate.yml` runs it again after every build on `main`, on
+the image as the registry serves it. The gate installs the image to a raw disk
+with `bootc install to-disk` (SELinux enforcing, as installed) and boots it in
+QEMU. It waits for the greeter, screenshots the framebuffer through QMP, and
+runs `scripts/boot-gate-checks.sh` inside the guest at boot. Those checks compare the
 running system with the commit under test: the GDM wordmark and the light
 wallpaper by SHA-256, the greeter's and the desktop's compiled dconf databases,
 the login banner in an interactive login shell (once per session, silent in
-scripts, off with `DISTR0_NO_BANNER=1`), and the Italian locale, keymap and
-timezone. The screenshot and the log are uploaded with the run.
+scripts, off with `DISTR0_NO_BANNER=1`, and the only greeting), that Bluefin's
+tools see the DISTR0 image, the default hostname, and the Italian locale,
+console keymap, login-screen keyboard layout and timezone. The screenshot and
+the log are uploaded with the run.
 
 ```bash
 just boot-gate                                   # the published image
 just boot-gate ghcr.io/progliodario/distr0:latest "$(git rev-parse HEAD)"
+sudo scripts/boot-gate.sh --local localhost/distr0:latest   # a local build in root's storage
 ```
 
 It needs `podman` (to pull the image and install it), `qemu` and `python3`; KVM
@@ -202,6 +229,11 @@ The GNOME keyboard layout (`it`) and the wallpapers come from
 `dconf-update.service`. `ujust distr0-reset-desktop` re-applies them after you
 change something by hand.
 
+The login screen does not read any user's dconf: GDM takes the layout from
+`systemd-localed`, so the image also ships `/etc/X11/xorg.conf.d/00-keyboard.conf`
+and `XKBLAYOUT=it` in `/etc/vconsole.conf` — without them the password is typed
+on a US layout. `sudo localectl set-x11-keymap <layout>` changes it.
+
 ## Desktop defaults and the login banner
 
 Two separate mechanisms, on purpose:
@@ -220,15 +252,40 @@ The login screen has its own database: `/etc/dconf/db/gdm.d/01-distr0-gdm`
 points `org.gnome.login-screen logo` at
 `/usr/share/pixmaps/distr0-gdm-logo.png`.
 
-In a terminal, `/etc/profile.d/zz-distr0-banner.sh` prints three lines — image
-version, base and kernel, the two commands worth knowing. It runs in interactive
-shells only, once per session, and reads its text from
-`/usr/share/distr0/banner.sh`, which is also what `ujust distr0-greeting` runs:
+In a terminal, `/etc/profile.d/zz-distr0-banner.sh` prints three lines, in
+Italian — image version, base and kernel, the commands worth knowing. It
+replaces Bluefin's motd (which named the base image), runs in interactive shells
+only, once per session, and reads its text from `/usr/share/distr0/banner.sh`,
+which is also what `ujust distr0-greeting` runs:
 
 ```bash
+ujust toggle-user-motd      # per user, the same switch Bluefin's motd used
 DISTR0_NO_BANNER=1          # in ~/.profile or /etc/environment, turns it off
 ujust distr0-greeting       # the greeting plus fastfetch, on demand
 ```
+
+## Bluefin's tools, pointed at DISTR0
+
+Bluefin's motd, `ujust changelogs`, `ujust devmode` and `ujust rebase-helper`
+learn which image they run on from `/usr/share/ublue-os/image-info.json`, not
+from `os-release`. As the base ships it, that file names
+`ghcr.io/ublue-os/bluefin`, and `ujust devmode` would `bootc switch` a DISTR0
+machine to `bluefin-dx`. `build.sh` rewrites the fields that name the image, and
+`60-custom.just` replaces four recipes: `toggle-devmode` explains that DISTR0
+has no developer variant, `rebase-helper` (alias `rollback-helper`) picks a dated
+DISTR0 build, `changelogs` shows DISTR0's history, `toggle-user-motd` switches
+the DISTR0 banner. `ujust` keeps the *first* definition of a recipe it imports,
+so `build.sh` moves the import of `60-custom.just` to the top of
+`00-entry.just`; the self-test reads each winning recipe back.
+
+## Smart cards: CIE, CNS, firma digitale
+
+The base already has `pcscd`, the CCID driver and OpenSC, which reads the CIE
+and many CNS cards. Browsers installed as Flatpaks reach a card only through the
+host's p11-kit server, so the image enables `p11-kit-server.socket` for every
+user. `ujust distr0-smartcard` lists the readers, the card and its PKCS#11 slots.
+Nothing in CI has a card reader: this is marked `machine only` in
+[`docs/claims.md`](docs/claims.md).
 
 `ujust distr0-greeting` is the full picture: a fastfetch preset at
 `/usr/share/fastfetch/presets/distr0.jsonc` with the DISTR0 mark in ASCII. The
@@ -353,9 +410,10 @@ just check-updates    # exits non-zero when a pin is stale
 
 It compares all three pins with their registries and prints the
 `skopeo inspect docker://<image> | jq -r .Digest` line to copy. Renovate (see
-`.github/renovate.json5`) opens the base-image bump as a pull request when the
-app is installed on the repository; Dependabot keeps the GitHub Actions versions
-current.
+`.github/renovate.json5`, the only update bot) opens the base-image bump, the
+grouped action updates and the build-tool digests as pull requests once a week
+when the app is installed on the repository. A cosign major update is disabled
+on purpose: v3 needs the signing flags changed by hand.
 
 ## ArtifactHub
 
@@ -375,6 +433,8 @@ it is replaced, the repository will not be verified on
 - A build that fails at `bootc container lint` means the resulting image is not a
   valid bootc image — check the lint output above it. The smoke tests at the end
   of `build.sh` fail fast when the overlay or the branding did not land.
+- The card is not seen? `ujust distr0-smartcard` shows whether the reader, the
+  card and the p11-kit server are there; restart Firefox after inserting it.
 - `just clean` removes build artifacts (`output/`, `_build*`, manifests).
 
 ## Credits and licensing

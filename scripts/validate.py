@@ -236,11 +236,33 @@ def check_recipes() -> None:
         "distr0-verify",
         "distr0-doctor",
         "distr0-rollback",
+        "distr0-smartcard",
+        # Bluefin's recipes that would leave DISTR0 or describe Bluefin; build.sh
+        # imports 60-custom.just first so these definitions win.
+        "toggle-devmode",
+        "rebase-helper",
+        "changelogs",
+        "toggle-user-motd",
     ):
         check(
             f"60-custom.just defines {recipe}",
             re.search(rf"^{recipe}\b", custom, re.MULTILINE) is not None,
         )
+    switches = [
+        line.strip()
+        for line in custom.splitlines()
+        if "bootc switch" in line and not line.strip().startswith("#")
+    ]
+    check(
+        "60-custom.just only ever switches to DISTR0, with the signature policy",
+        "image=ghcr.io/progliodario/distr0" in custom
+        and all(
+            "--enforce-container-sigpolicy" in line
+            and ("${image}" in line or "ghcr.io/progliodario/distr0" in line)
+            for line in switches
+        ),
+        f"{switches}",
+    )
     justfile = read("Justfile")
     for recipe in (
         "build",
@@ -272,7 +294,8 @@ def recipe_names(rel: str) -> set[str]:
 COMMAND = r"([a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9])(?![\w*-])"
 
 # Recipes that Bluefin ships and we only point at; they are not in 60-custom.just.
-UPSTREAM_UJUST = {"bbrew"}
+# `devmode` is Bluefin's alias that calls toggle-devmode, which DISTR0 replaces.
+UPSTREAM_UJUST = {"bbrew", "devmode"}
 
 
 def check_image_promises() -> None:
@@ -282,8 +305,34 @@ def check_image_promises() -> None:
         "build.sh sets IMAGE_ID to distr0",
         re.search(r"^set_os_release IMAGE_ID '?distr0'?$", build, re.MULTILINE) is not None,
     )
-    check("build.sh sets IMAGE_VERSION from the base image", "set_os_release IMAGE_VERSION" in build)
+    check("build.sh sets IMAGE_VERSION to DISTR0's own build", 'set_os_release IMAGE_VERSION "${image_version}"' in build)
     check("build.sh keeps OSTREE_VERSION from the base", "OSTREE_VERSION" in build)
+    check(
+        "build.sh points image-info.json at DISTR0",
+        "image-info.json" in build and '"image-name": "distr0"' in build,
+        "Bluefin's motd, changelog and rebase helpers read the image from it",
+    )
+    check(
+        "build.sh imports 60-custom.just first",
+        "00-entry.just" in build and "custom_import" in build,
+        "ujust keeps the first definition of a recipe; imported last, DISTR0 cannot override Bluefin",
+    )
+    check("build.sh sets the default hostname", 'DEFAULT_HOSTNAME \'"distr0"\'' in build)
+    check(
+        "the Containerfile writes /etc/hostname with COPY",
+        "COPY --from=ctx /system_files/etc/hostname /etc/hostname" in read("Containerfile")
+        and read("system_files/etc/hostname").strip() == "distr0",
+        "a RUN step writes into the builder's bind-mounted /etc/hostname, which is never committed",
+    )
+    check(
+        "build.sh leaves no dnf state in /var or /run",
+        "rm -rf /var/lib/dnf /run/dnf" in build,
+        "bootc container lint --fatal-warnings rejects it",
+    )
+    check(
+        "the Containerfile lints with fatal warnings",
+        "bootc container lint --fatal-warnings" in read("Containerfile"),
+    )
     check(
         "build.sh installs packages without weak dependencies",
         "install_weak_deps=False" in build,
@@ -477,7 +526,12 @@ def check_boot_gate() -> None:
             "the boot gate checks out the commit that was built",
             "workflow_run.head_sha" in text,
         )
-        check("the boot gate runs the shipped script", "scripts/boot-gate.sh" in text)
+        check("the boot gate runs the shipped script", "scripts/boot-gate-ci.sh" in text)
+        gate_ci = ROOT / "scripts/boot-gate-ci.sh"
+        check(
+            "the CI wrapper runs scripts/boot-gate.sh",
+            gate_ci.is_file() and "boot-gate.sh" in gate_ci.read_text(encoding="utf-8").replace("boot-gate-ci.sh", ""),
+        )
         check("the boot gate can also be started by hand", "workflow_dispatch" in text)
         check("the boot gate keeps the login screen", "login-screen.ppm" in text)
 
@@ -578,7 +632,22 @@ def check_delivery() -> None:
     )
     check("CI attests the SBOM", "cosign attest" in build)
     check("CI measures layer reuse", "layer-diff.py" in build)
-    check("CI keeps the bootc lint advisory", "continue-on-error: true" in build)
+    check(
+        "CI boots the image before publishing it",
+        "--local" in build
+        and "scripts/boot-gate-ci.sh" in build
+        and build.index("scripts/boot-gate-ci.sh") < build.index("- name: Push To GHCR"),
+        "the gate must run between the rechunk and the push",
+    )
+    check(
+        "CI signs and attests by digest",
+        "@${DIGEST}" in build and "@${{ steps.push.outputs.digest }}" in build,
+        "a tag can move between push and sign; a digest cannot",
+    )
+    check(
+        "CI checks the signature is the attachment containers/image reads",
+        "application/vnd.dev.cosign.simplesigning.v1+json" in build,
+    )
 
     verify = read(".github/workflows/verify-image.yml")
     check("CI verifies the SBOM attestation", "cosign verify-attestation" in verify)
@@ -598,8 +667,31 @@ def check_delivery() -> None:
 
     # The self-test's failures are annotations, not just text in a log: a
     # repository whose automation cannot read job logs still sees them.
-    for marker in ("::error title=DISTR0 self-test", "::warning title=bootc container lint"):
-        check(f"CI annotates {marker.split(' title=')[1].split('::')[0]} messages", marker in build)
+    check("CI annotates DISTR0 self-test messages", "::error title=DISTR0 self-test" in build)
+    gate_ci = ROOT / "scripts/boot-gate-ci.sh"
+    check(
+        "the CI wrapper annotates every failed boot gate check",
+        gate_ci.is_file() and "::error title=DISTR0 boot gate" in gate_ci.read_text(encoding="utf-8"),
+    )
+
+    # cosign 3 writes a Sigstore bundle by default, which containers/image (and
+    # so bootc on every device) cannot see: images signed that way install as
+    # unsigned. Bluefin shipped exactly that for two months in 2026.
+    for path in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
+        text = path.read_text(encoding="utf-8")
+        release = re.search(r"cosign-release:\s*'?v(\d+)\.", text)
+        if not release or int(release.group(1)) < 3:
+            continue
+        signing = [
+            line.strip()
+            for line in text.splitlines()
+            if re.search(r"\bcosign (sign|attest)\b", line) and not line.strip().startswith("#")
+        ]
+        check(
+            f"{path.relative_to(ROOT)} keeps cosign 3 on the format bootc verifies",
+            all("--new-bundle-format=false" in line for line in signing),
+            "cosign v3 needs --new-bundle-format=false (and --use-signing-config=false)",
+        )
 
     # Publishing is the one thing a pull request must never do: a fork cannot
     # write packages here, and an unreviewed commit must not become a tag users
@@ -610,7 +702,12 @@ def check_delivery() -> None:
         print("skip  pull requests never publish — PyYAML is not installed (CI installs it)")
     else:
         doc = yaml.safe_load(build) or {}
-        for name in ("Push To GHCR", "Sign container image", "Attest the SBOM"):
+        for name in (
+            "Push To GHCR",
+            "Sign container image",
+            "The signature is one bootc can verify",
+            "Attest the SBOM",
+        ):
             step = next(
                 (
                     step

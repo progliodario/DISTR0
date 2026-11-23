@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import struct
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 
 import pytest
@@ -241,3 +243,115 @@ def test_boot_gate_checks_are_valid_bash_and_cover_the_identity() -> None:
         "/org/gnome/desktop/background/picture-uri",
     ):
         assert marker in text
+
+
+def _rgba_png_alpha_columns(path: Path) -> tuple[int, int]:
+    """Width and the right-most column with any opaque pixel, for an RGBA PNG.
+
+    A few lines of PNG decoding instead of a Pillow dependency: the repository's
+    checks must run on a bare runner.
+    """
+    data = path.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    pos, idat, width = 8, b"", 0
+    while pos < len(data):
+        (length,) = struct.unpack(">I", data[pos : pos + 4])
+        kind = data[pos + 4 : pos + 8]
+        body = data[pos + 8 : pos + 8 + length]
+        if kind == b"IHDR":
+            width, height, depth, colour, _, _, interlace = struct.unpack(">IIBBBBB", body)
+            assert (depth, colour, interlace) == (8, 6, 0), "expected 8-bit RGBA, not interlaced"
+        elif kind == b"IDAT":
+            idat += body
+        pos += 12 + length
+    raw = zlib.decompress(idat)
+    stride = width * 4
+    previous = bytearray(stride)
+    right = -1
+    for row in range(height):
+        start = row * (stride + 1)
+        kind, line = raw[start], bytearray(raw[start + 1 : start + 1 + stride])
+        for i in range(stride):
+            left = line[i - 4] if i >= 4 else 0
+            up = previous[i]
+            corner = previous[i - 4] if i >= 4 else 0
+            if kind == 1:
+                line[i] = (line[i] + left) & 0xFF
+            elif kind == 2:
+                line[i] = (line[i] + up) & 0xFF
+            elif kind == 3:
+                line[i] = (line[i] + (left + up) // 2) & 0xFF
+            elif kind == 4:
+                guess = left + up - corner
+                pa, pb, pc = abs(guess - left), abs(guess - up), abs(guess - corner)
+                pred = left if pa <= pb and pa <= pc else up if pb <= pc else corner
+                line[i] = (line[i] + pred) & 0xFF
+        for x in range(width - 1, right, -1):
+            if line[x * 4 + 3]:
+                right = x
+                break
+        previous = line
+    return width, right
+
+
+def test_the_login_wordmark_fits_inside_its_canvas() -> None:
+    # At a fixed 46 px the name ran past the right edge and GDM showed "DISTR"
+    # with half a zero; render-assets.py now sizes it to leave a margin.
+    width, right = _rgba_png_alpha_columns(ROOT / "system_files/usr/share/pixmaps/distr0-gdm-logo.png")
+    assert right >= 0, "the wordmark is empty"
+    assert right <= width - 4, f"the wordmark touches the right edge: last opaque column {right} of {width}"
+
+
+def test_boot_gate_local_mode_skips_the_pull_and_keeps_the_revision_check() -> None:
+    text = (ROOT / "scripts/boot-gate.sh").read_text(encoding="utf-8")
+    assert "--local)" in text and "podman image exists" in text
+    # The revision check must apply to a local image too: CI passes the commit.
+    assert '[[ -z ${EXPECT_REVISION} || -n ${IMAGE} ]]' in text
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/boot-gate.sh"), "--local", "x", "--disk", "y"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0 and "not both" in result.stderr
+
+
+def test_boot_gate_ci_wrapper_annotates_failures(tmp_path: Path) -> None:
+    # A fake gate that fails two checks: the wrapper must exit non-zero and turn
+    # each FAIL line into an error annotation, and each PHASE into a notice.
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    wrapper = scripts / "boot-gate-ci.sh"
+    wrapper.write_text((ROOT / "scripts/boot-gate-ci.sh").read_text(encoding="utf-8"))
+    fake = scripts / "boot-gate.sh"
+    fake.write_text("#!/usr/bin/env bash\necho 'PHASE booting'\necho 'FAIL  one'\necho 'FAIL  two'\nexit 1\n")
+    fake.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(wrapper), str(tmp_path / "work")], check=False, capture_output=True, text=True
+    )
+    assert result.returncode == 1
+    assert "::notice title=DISTR0 boot gate::booting" in result.stdout
+    assert result.stdout.count("::error title=DISTR0 boot gate::FAIL") == 2
+
+
+def test_custom_recipes_override_bluefin_when_imported_first(tmp_path: Path) -> None:
+    # The mechanism build.sh relies on: with allow-duplicate-recipes, `just`
+    # keeps the definition from the *first* import. Prove it with the real
+    # 60-custom.just against a stand-in for Bluefin's system.just.
+    just = subprocess.run(["bash", "-c", "command -v just"], capture_output=True, text=True).stdout.strip()
+    if not just:
+        pytest.skip("just is not installed")
+    bluefin = tmp_path / "system.just"
+    bluefin.write_text("toggle-devmode:\n    echo bluefin-dx\n")
+    custom = ROOT / "system_files/usr/share/ublue-os/just/60-custom.just"
+    entry = tmp_path / "00-entry.just"
+    entry.write_text(
+        f'set allow-duplicate-recipes := true\nimport? "{custom}"\nimport "{bluefin}"\n'
+    )
+    shown = subprocess.run(
+        [just, "--justfile", str(entry), "--working-directory", str(tmp_path), "--show", "toggle-devmode"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "DISTR0" in shown and "bluefin-dx" not in shown
